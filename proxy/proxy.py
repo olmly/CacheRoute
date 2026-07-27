@@ -35,6 +35,7 @@ from core import forward_request
 from core import config
 
 from proxy.sclient.scheduler_client import SchedulerControlClient
+from proxy.cache import build_prefix_key, LMCacheMetricsPoller
 from proxy.resource.instance_pool import InstancePool
 from proxy.resource import p_control_plane
 from proxy.resource.hb_log import HeartbeatReporter, hb_report_loop
@@ -135,6 +136,8 @@ async def lifespan(app: FastAPI):
     p_control_plane.set_pool(app.state.instance_pool)  # type: ignore
     p_control_plane.set_pool_resource_context(PROXY_ID, PROXY_MAX_CAPACITY)
     p_control_plane.set_queue_snapshot_provider(lambda: queue_mgr.queue_pressure_snapshot())
+    app.state.cache_metrics_poller = LMCacheMetricsPoller(app.state.instance_pool, logger_=logger)  # type: ignore
+    p_control_plane.set_cache_refresh_provider(app.state.cache_metrics_poller.refresh)  # type: ignore
 
     # --- Load the proxy scheduling strategy for the data plane ---
     strategy_name = os.environ.get("PROXY_INSTANCE_STRATEGY", "round_robin")
@@ -235,6 +238,13 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(float(getattr(app.state, "_hb_interval", PROXY_HEARTBEAT_S)))  # type: ignore
 
     app.state._hb_task = asyncio.create_task(_hb_loop())  # type: ignore
+    app.state._cache_metrics_task = asyncio.create_task(  # type: ignore
+        app.state.cache_metrics_poller.run_forever(app.state._hb_stop)  # type: ignore
+    )
+    logger.info(
+        "[Proxy][LMCache] metrics poller started interval=%ss",
+        getattr(app.state.cache_metrics_poller, "interval_s", "?"),
+    )
 
     try:
         yield
@@ -261,6 +271,9 @@ async def lifespan(app: FastAPI):
             task = getattr(app.state, "_hb_task", None)  # type: ignore
             if task:
                 task.cancel()
+            cache_task = getattr(app.state, "_cache_metrics_task", None)  # type: ignore
+            if cache_task:
+                cache_task.cancel()
             rpt = getattr(app.state, "_hb_report_task", None)  # type: ignore
             if rpt:
                 rpt.cancel()
@@ -381,6 +394,9 @@ def build_cacheroute_meta(task: ProxyTask) -> Dict[str, Any]:
         "kv_ready_kids": task.kv_ready_kids,
         "text_only_kids": task.text_only_kids,
         "miss_kids": task.miss_kids,
+        "prefix_key": task.prefix_key,
+        "cache_lookup": task.cache_lookup,
+        "route_score_breakdown": task.route_score_breakdown,
         "error": task.error,
     }
 
@@ -438,6 +454,35 @@ async def _wrap_chat_stream_with_meta(
             instance_pool.end_request(instance_id)
 
 
+def _build_cache_lookup(pool: InstancePool, req_obj: SchedulerRequest) -> Dict[str, Any]:
+    service = getattr(req_obj, "Service", None)
+    prompt = getattr(req_obj, "Prompt", None)
+    knowledge_ids = getattr(service, "Knowledge_List", []) or []
+    injection_type = getattr(service, "Injection_type", "kvcache")
+    model = getattr(prompt, "model", "")
+    if not knowledge_ids:
+        return {"enabled": False, "reason": "no_knowledge_ids", "matches": []}
+    prefix_key = build_prefix_key(model=model, knowledge_ids=knowledge_ids, injection_type=injection_type)
+    matches = pool.lookup_prefix(prefix_key, include_dead=False)
+    return {
+        "enabled": True,
+        "prefix_key": prefix_key,
+        "knowledge_ids": [str(item) for item in knowledge_ids],
+        "matches": [
+            {
+                "instance_id": item.instance_id,
+                "matched_chunks": item.matched_chunks,
+                "total_chunks": item.total_chunks,
+                "matched_tokens": item.matched_tokens,
+                "residency_score": item.residency_score,
+                "devices": item.devices,
+                "last_seen_at": item.last_seen_at,
+            }
+            for item in matches
+        ],
+    }
+
+
 def select_instance(app: FastAPI, req_obj: SchedulerRequest):
     """
     Select one instance for the data plane.
@@ -459,13 +504,21 @@ def select_instance(app: FastAPI, req_obj: SchedulerRequest):
             "[Proxy] queue snapshot failed during instance select; least_load will use inflight-only metrics",
             exc_info=True,
         )
+    try:
+        hint["cache_lookup"] = _build_cache_lookup(pool, req_obj)
+    except Exception:
+        logger.warning(
+            "[Proxy] cache lookup failed during instance select; strategy will fallback without cache hints",
+            exc_info=True,
+        )
+        hint["cache_lookup"] = {"enabled": False, "reason": "lookup_failed", "matches": []}
 
     try:
         chosen = strategy.select(instances, hint=hint)
-        return chosen
+        return chosen, hint
     except Exception as e:
         logger.warning("[Proxy] instance select failed: err=%s", str(e))
-        return None
+        return None, hint
 
 
 #--------------------------------------------------------------
@@ -502,7 +555,7 @@ async def proxy_chat_completions(request: FastAPIRequest):
     instance_body = build_body_for_instance(req_obj, mode="chat")
 
     route_select_start_ms = int(time.time() * 1000)
-    chosen = select_instance(proxy, req_obj)
+    chosen, route_hint = select_instance(proxy, req_obj)
     route_select_end_ms = int(time.time() * 1000)
     if not chosen:
         return JSONResponse(
@@ -629,6 +682,15 @@ async def proxy_chat_completions(request: FastAPIRequest):
             kdn_addr=getattr(req_obj.Task, "KDN_server_addr", None),
             url_path=url_path,
         )
+        task.prefix_key = route_hint.get("cache_lookup", {}).get("prefix_key")
+        task.cache_lookup = route_hint.get("cache_lookup", {})
+        task.route_score_breakdown = {"strategy": getattr(proxy.state.instance_strategy, "name", "unknown")}
+        try:
+            score_detail = proxy.state.instance_strategy.compute_score(chosen, hint=route_hint)  # type: ignore
+            if isinstance(score_detail, dict):
+                task.route_score_breakdown.update(score_detail)
+        except Exception:
+            logger.debug("[Proxy] route score breakdown unavailable", exc_info=True)
         task.trace["proxy_recv_ms"] = proxy_recv_ms
         task.trace["route_select_start_ms"] = route_select_start_ms
         task.trace["route_select_end_ms"] = route_select_end_ms
@@ -679,7 +741,7 @@ async def proxy_completions(request: FastAPIRequest):
     instance_body = build_body_for_instance(req_obj, mode="completions")
 
     route_select_start_ms = int(time.time() * 1000)
-    chosen = select_instance(proxy, req_obj)
+    chosen, route_hint = select_instance(proxy, req_obj)
     route_select_end_ms = int(time.time() * 1000)
     if not chosen:
         return JSONResponse(
@@ -806,6 +868,15 @@ async def proxy_completions(request: FastAPIRequest):
             kdn_addr=getattr(req_obj.Task, "KDN_server_addr", None),
             url_path=url_path,
         )
+        task.prefix_key = route_hint.get("cache_lookup", {}).get("prefix_key")
+        task.cache_lookup = route_hint.get("cache_lookup", {})
+        task.route_score_breakdown = {"strategy": getattr(proxy.state.instance_strategy, "name", "unknown")}
+        try:
+            score_detail = proxy.state.instance_strategy.compute_score(chosen, hint=route_hint)  # type: ignore
+            if isinstance(score_detail, dict):
+                task.route_score_breakdown.update(score_detail)
+        except Exception:
+            logger.debug("[Proxy] route score breakdown unavailable", exc_info=True)
         task.trace["proxy_recv_ms"] = proxy_recv_ms
         task.trace["route_select_start_ms"] = route_select_start_ms
         task.trace["route_select_end_ms"] = route_select_end_ms

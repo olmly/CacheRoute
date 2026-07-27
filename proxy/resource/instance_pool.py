@@ -17,6 +17,78 @@ class InstanceLoad:
     qps_1m: Optional[float] = None
     gpu_util: Optional[float] = None
 
+#实例级的感知信息
+"""
+时间戳，最近上报时间，命中成功率，
+缓存淘汰率，存储QPS，检索QPS，查找QPS，
+存储平均延迟，检索平均延迟，查找平均延迟，
+l1使用量和总容量；
+l2使用量和总容量
+当前正在进行推理请求，活跃会话；综合压力
+扩展字段
+"""
+@dataclass
+class InstanceCacheMetrics:
+    # Proxy-visible LMCache summary only; this intentionally excludes tensor payloads.
+    status: str = "unknown"
+    source: Optional[str] = None
+    source_endpoint: Optional[str] = None
+    timestamp: Optional[int] = None
+    last_reported_at: Optional[int] = None
+    last_success_at: Optional[int] = None
+    last_error_at: Optional[int] = None
+    success_count: int = 0
+    error_count: int = 0
+    last_error: Optional[str] = None
+    fetch_step: Optional[str] = None
+    detail: Optional[str] = None
+    hit_rate: Optional[float] = None
+    eviction_rate: Optional[float] = None
+    store_qps: Optional[float] = None
+    retrieve_qps: Optional[float] = None
+    lookup_qps: Optional[float] = None
+    avg_store_latency_ms: Optional[float] = None
+    avg_retrieve_latency_ms: Optional[float] = None
+    avg_lookup_latency_ms: Optional[float] = None
+    l1_usage_bytes: Optional[float] = None
+    l1_capacity_bytes: Optional[float] = None
+    l2_usage_bytes: Optional[float] = None
+    l2_capacity_bytes: Optional[float] = None
+    active_sessions: Optional[int] = None
+    pressure_score: Optional[float] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+"""kvcache块元数据结构：
+token哈希值唯一标识，实例id，存储位置，
+命中token数，“钉住”禁止被淘汰策略删除，
+压缩，编码器名称，首次创建时间戳，最近被访问时间戳，状态
+"""
+@dataclass
+class CacheChunkLocation:
+    chunk_key: str
+    instance_id: str
+    device: str = "unknown"
+    hit_tokens: Optional[int] = None
+    pinned: Optional[bool] = None
+    compressed: Optional[bool] = None
+    codec: Optional[str] = None
+    first_seen_at: int = field(default_factory=lambda: int(time.time()))
+    last_seen_at: int = field(default_factory=lambda: int(time.time()))
+    last_validated_at: Optional[int] = None
+    state: str = "present"
+
+
+@dataclass
+class PrefixPresence:
+    prefix_key: str
+    instance_id: str
+    matched_chunks: int
+    total_chunks: int
+    matched_tokens: Optional[int] = None
+    residency_score: float = 0.0
+    devices: List[str] = field(default_factory=list)
+    last_seen_at: int = field(default_factory=lambda: int(time.time()))
+
 
 @dataclass
 class InstanceResource:
@@ -57,6 +129,7 @@ class InstanceInfo:
     meta: Dict[str, Any] = field(default_factory=dict)
 
     load: InstanceLoad = field(default_factory=InstanceLoad)
+    cache_metrics: InstanceCacheMetrics = field(default_factory=InstanceCacheMetrics)
     resource: InstanceResource = field(default_factory=InstanceResource)
     registered_at: int = field(default_factory=lambda: int(time.time()))
     last_seen_at: int = field(default_factory=lambda: int(time.time()))
@@ -73,6 +146,8 @@ class InstancePool:
         self._ttl_s = int(ttl_s)
         self._lock = threading.Lock()
         self._items: Dict[str, InstanceInfo] = {}
+        self._chunk_locations: Dict[str, Dict[str, CacheChunkLocation]] = {}
+        self._prefix_presence: Dict[str, Dict[str, PrefixPresence]] = {}
 
     @property
     def ttl_s(self) -> int:
@@ -155,6 +230,302 @@ class InstancePool:
             it.resource = _resource_from_snapshot(snapshot=snapshot, reported_at=now, metadata=metadata or {})
             return True
 
+    def report_cache_metrics(
+        self,
+        instance_id: str,
+        snapshot: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        now = int(time.time())
+        with self._lock:
+            it = self._items.get(instance_id)
+            if not it:
+                return False
+            it.last_seen_at = now
+            prev = it.cache_metrics
+            next_metrics = _cache_metrics_from_snapshot(snapshot=snapshot, reported_at=now, metadata=metadata or {})
+            it.cache_metrics = _merge_cache_metrics(prev=prev, current=next_metrics, reported_at=now)
+            return True
+
+    def report_cache_directory(
+        self,
+        instance_id: str,
+        prefix_key: str,
+        chunk_keys: List[str],
+        token_count: Optional[int] = None,
+        matched_tokens: Optional[int] = None,
+        device: str = "unknown",
+        state: str = "present",
+        last_validated_at: Optional[int] = None,
+    ) -> bool:
+        now = int(time.time())
+        normalized_prefix = str(prefix_key or "").strip()
+        normalized_chunks = [str(chunk).strip() for chunk in (chunk_keys or []) if str(chunk).strip()]
+        if not normalized_prefix or not normalized_chunks:
+            return False
+        normalized_device = str(device or "unknown").strip().lower() or "unknown"
+        normalized_state = str(state or "present").strip().lower() or "present"
+        with self._lock:
+            it = self._items.get(instance_id)
+            if not it:
+                return False
+            it.last_seen_at = now
+            presence_by_instance = self._prefix_presence.setdefault(normalized_prefix, {})
+            locations_by_chunk = self._chunk_locations
+            distinct_devices: List[str] = []
+            for chunk_key in normalized_chunks:
+                chunk_map = locations_by_chunk.setdefault(chunk_key, {})
+                existing = chunk_map.get(instance_id)
+                if existing is None:
+                    chunk_map[instance_id] = CacheChunkLocation(
+                        chunk_key=chunk_key,
+                        instance_id=instance_id,
+                        device=normalized_device,
+                        hit_tokens=matched_tokens,
+                        first_seen_at=now,
+                        last_seen_at=now,
+                        last_validated_at=last_validated_at,
+                        state=normalized_state,
+                    )
+                else:
+                    existing.device = normalized_device
+                    existing.hit_tokens = matched_tokens
+                    existing.last_seen_at = now
+                    existing.last_validated_at = last_validated_at
+                    existing.state = normalized_state
+                if normalized_device not in distinct_devices:
+                    distinct_devices.append(normalized_device)
+
+            chunk_count = len(normalized_chunks)
+            matched = int(matched_tokens) if matched_tokens is not None else None
+            total_tokens = int(token_count) if token_count is not None else None
+            if chunk_count <= 0:
+                residency_score = 0.0
+            elif total_tokens and total_tokens > 0 and matched is not None:
+                residency_score = max(0.0, min(1.0, float(matched) / float(total_tokens)))
+            else:
+                residency_score = 1.0
+            presence_by_instance[instance_id] = PrefixPresence(
+                prefix_key=normalized_prefix,
+                instance_id=instance_id,
+                matched_chunks=chunk_count,
+                total_chunks=chunk_count,
+                matched_tokens=matched,
+                residency_score=residency_score,
+                devices=distinct_devices,
+                last_seen_at=now,
+            )
+            return True
+
+    def lookup_prefix(self, prefix_key: str, include_dead: bool = False) -> List[PrefixPresence]:
+        now = int(time.time())
+        normalized_prefix = str(prefix_key or "").strip()
+        if not normalized_prefix:
+            return []
+        with self._lock:
+            presence_map = dict(self._prefix_presence.get(normalized_prefix, {}))
+            items = dict(self._items)
+        matches: List[PrefixPresence] = []
+        for instance_id, presence in presence_map.items():
+            it = items.get(instance_id)
+            if it is None:
+                continue
+            is_alive = (now - int(it.last_seen_at)) <= self._ttl_s
+            if include_dead or is_alive:
+                matches.append(presence)
+        return sorted(matches, key=lambda item: (-float(item.residency_score), -int(item.last_seen_at)))
+
+    def get_chunk_locations(self, chunk_key: str, include_dead: bool = False) -> List[CacheChunkLocation]:
+        now = int(time.time())
+        normalized_chunk = str(chunk_key or "").strip()
+        if not normalized_chunk:
+            return []
+        with self._lock:
+            location_map = dict(self._chunk_locations.get(normalized_chunk, {}))
+            items = dict(self._items)
+        matches: List[CacheChunkLocation] = []
+        for instance_id, location in location_map.items():
+            it = items.get(instance_id)
+            if it is None:
+                continue
+            is_alive = (now - int(it.last_seen_at)) <= self._ttl_s
+            if include_dead or is_alive:
+                matches.append(location)
+        return sorted(matches, key=lambda item: (-int(item.last_seen_at), item.instance_id))
+
+    def snapshot_cache_metrics(self, include_dead: bool = True) -> Dict[str, Any]:
+        now = int(time.time())
+        with self._lock:
+            items = list(self._items.values())
+        instances: List[Dict[str, Any]] = []
+        for it in items:
+            is_alive = (now - int(it.last_seen_at)) <= self._ttl_s
+            if not include_dead and not is_alive:
+                continue
+            metrics = it.cache_metrics
+            instances.append(
+                {
+                    "instance_id": it.instance_id,
+                    "is_alive": is_alive,
+                    "cache_metrics": {
+                        "status": metrics.status,
+                        "source": metrics.source,
+                        "source_endpoint": metrics.source_endpoint,
+                        "timestamp": metrics.timestamp,
+                        "last_reported_at": metrics.last_reported_at,
+                        "last_success_at": metrics.last_success_at,
+                        "last_error_at": metrics.last_error_at,
+                        "success_count": metrics.success_count,
+                        "error_count": metrics.error_count,
+                        "last_error": metrics.last_error,
+                        "fetch_step": metrics.fetch_step,
+                        "detail": metrics.detail,
+                        "hit_rate": metrics.hit_rate,
+                        "eviction_rate": metrics.eviction_rate,
+                        "store_qps": metrics.store_qps,
+                        "retrieve_qps": metrics.retrieve_qps,
+                        "lookup_qps": metrics.lookup_qps,
+                        "avg_store_latency_ms": metrics.avg_store_latency_ms,
+                        "avg_retrieve_latency_ms": metrics.avg_retrieve_latency_ms,
+                        "avg_lookup_latency_ms": metrics.avg_lookup_latency_ms,
+                        "l1_usage_bytes": metrics.l1_usage_bytes,
+                        "l1_capacity_bytes": metrics.l1_capacity_bytes,
+                        "l2_usage_bytes": metrics.l2_usage_bytes,
+                        "l2_capacity_bytes": metrics.l2_capacity_bytes,
+                        "active_sessions": metrics.active_sessions,
+                        "pressure_score": metrics.pressure_score,
+                    },
+                }
+            )
+        return {
+            "ttl_s": self._ttl_s,
+            "generated_at": time.time(),
+            "metric_source": "instance_cache_metrics",
+            "instances": instances,
+        }
+
+    def snapshot_cache_directory(self, include_dead: bool = True) -> Dict[str, Any]:
+        with self._lock:
+            prefix_presence = {prefix: dict(items) for prefix, items in self._prefix_presence.items()}
+            chunk_locations = {chunk: dict(items) for chunk, items in self._chunk_locations.items()}
+        prefixes: Dict[str, Any] = {}
+        for prefix_key, items in prefix_presence.items():
+            rows = []
+            for presence in self.lookup_prefix(prefix_key, include_dead=include_dead):
+                rows.append(
+                    {
+                        "instance_id": presence.instance_id,
+                        "matched_chunks": presence.matched_chunks,
+                        "total_chunks": presence.total_chunks,
+                        "matched_tokens": presence.matched_tokens,
+                        "residency_score": presence.residency_score,
+                        "devices": presence.devices,
+                        "last_seen_at": presence.last_seen_at,
+                    }
+                )
+            if rows:
+                prefixes[prefix_key] = rows
+        chunks: Dict[str, Any] = {}
+        for chunk_key in chunk_locations.keys():
+            rows = []
+            for location in self.get_chunk_locations(chunk_key, include_dead=include_dead):
+                rows.append(
+                    {
+                        "instance_id": location.instance_id,
+                        "device": location.device,
+                        "hit_tokens": location.hit_tokens,
+                        "pinned": location.pinned,
+                        "compressed": location.compressed,
+                        "codec": location.codec,
+                        "first_seen_at": location.first_seen_at,
+                        "last_seen_at": location.last_seen_at,
+                        "last_validated_at": location.last_validated_at,
+                        "state": location.state,
+                    }
+                )
+            if rows:
+                chunks[chunk_key] = rows
+        return {
+            "ttl_s": self._ttl_s,
+            "generated_at": time.time(),
+            "prefixes": prefixes,
+            "chunks": chunks,
+        }
+
+    def snapshot_cache_instances(self, include_dead: bool = True) -> Dict[str, Any]:
+        now = int(time.time())
+        with self._lock:
+            items = list(self._items.values())
+        instances: List[Dict[str, Any]] = []
+        for it in items:
+            is_alive = (now - int(it.last_seen_at)) <= self._ttl_s
+            if not include_dead and not is_alive:
+                continue
+            metrics = it.cache_metrics
+            instances.append(
+                {
+                    "instance_id": it.instance_id,
+                    "host": it.host,
+                    "port": it.port,
+                    "is_alive": is_alive,
+                    "cache": {
+                        "status": metrics.status,
+                        "source": metrics.source,
+                        "source_endpoint": metrics.source_endpoint,
+                        "timestamp": metrics.timestamp,
+                        "last_reported_at": metrics.last_reported_at,
+                        "last_success_at": metrics.last_success_at,
+                        "last_error_at": metrics.last_error_at,
+                        "success_count": metrics.success_count,
+                        "error_count": metrics.error_count,
+                        "last_error": metrics.last_error,
+                        "fetch_step": metrics.fetch_step,
+                        "detail": metrics.detail,
+                        "hit_rate": metrics.hit_rate,
+                        "lookup_qps": metrics.lookup_qps,
+                        "store_qps": metrics.store_qps,
+                        "retrieve_qps": metrics.retrieve_qps,
+                        "eviction_rate": metrics.eviction_rate,
+                        "avg_lookup_latency_ms": metrics.avg_lookup_latency_ms,
+                        "avg_store_latency_ms": metrics.avg_store_latency_ms,
+                        "avg_retrieve_latency_ms": metrics.avg_retrieve_latency_ms,
+                        "l1_usage_bytes": metrics.l1_usage_bytes,
+                        "l1_capacity_bytes": metrics.l1_capacity_bytes,
+                        "l2_usage_bytes": metrics.l2_usage_bytes,
+                        "l2_capacity_bytes": metrics.l2_capacity_bytes,
+                        "active_sessions": metrics.active_sessions,
+                        "pressure_score": metrics.pressure_score,
+                    },
+                }
+            )
+        return {
+            "ttl_s": self._ttl_s,
+            "generated_at": time.time(),
+            "instances": instances,
+        }
+
+    def snapshot_cache_summary(self, include_dead: bool = True) -> Dict[str, Any]:
+        snapshot = self.snapshot_cache_instances(include_dead=include_dead)
+        instances = snapshot.get("instances", [])
+        status_counts = {"ok": 0, "partial": 0, "error": 0, "unknown": 0}
+        total_errors = 0
+        total_success = 0
+        for item in instances:
+            cache = item.get("cache", {})
+            status = str(cache.get("status") or "unknown").strip().lower() or "unknown"
+            status_counts[status] = status_counts.get(status, 0) + 1
+            total_errors += int(cache.get("error_count") or 0)
+            total_success += int(cache.get("success_count") or 0)
+        return {
+            "ttl_s": snapshot.get("ttl_s"),
+            "generated_at": snapshot.get("generated_at"),
+            "instance_count": len(instances),
+            "status_counts": status_counts,
+            "total_error_count": total_errors,
+            "total_success_count": total_success,
+            "instances_with_success": sum(1 for item in instances if (item.get("cache", {}).get("last_success_at") is not None)),
+            "instances_with_error": sum(1 for item in instances if (item.get("cache", {}).get("last_error_at") is not None)),
+        }
 
     def begin_request(self, instance_id: str) -> bool:
         """Increment the Proxy-maintained inflight counter for an Instance."""
@@ -209,6 +580,9 @@ class InstancePool:
                 "is_alive": is_alive,
                 "inflight": inflight,
                 "qps_1m": qps_1m,
+                "cache_status": it.cache_metrics.status,
+                "cache_pressure_score": it.cache_metrics.pressure_score,
+                "cache_hit_rate": it.cache_metrics.hit_rate,
                 "prepare_queue_depth": queue_item.get("prepare_queue_depth"),
                 "ready_queue_depth": queue_item.get("ready_queue_depth"),
                 "active_prepare": queue_item.get("active_prepare"),
@@ -227,6 +601,7 @@ class InstancePool:
             "metric_source": {
                 "inflight": "proxy_lifecycle_counter",
                 "qps_1m": "instance_heartbeat",
+                "cache_metrics": "instance_cache_metrics",
                 "queue_depth": "proxy_queue_manager" if queue_depths is not None else "unavailable",
             },
             "instances": instances,
@@ -268,6 +643,8 @@ class InstancePool:
         missing_resource = max(0, len(alive_items) - len(reporting))
         inflight_values = [int(it.load.inflight) for it in alive_items if it.load.inflight is not None]
         qps_values = [float(it.load.qps_1m) for it in alive_items if it.load.qps_1m is not None]
+        cache_hit_values = [float(it.cache_metrics.hit_rate) for it in alive_items if it.cache_metrics.hit_rate is not None]
+        pressure_values = [float(it.cache_metrics.pressure_score) for it in alive_items if it.cache_metrics.pressure_score is not None]
         inflight_total = sum(inflight_values) if inflight_values else None
         qps_1m_total = sum(qps_values) if qps_values else None
         effective_capacity = int(capacity or 0)
@@ -305,6 +682,8 @@ class InstancePool:
             "resource": "instance_resource_snapshot" if reporting else "unavailable",
             "inflight_total": "proxy_lifecycle_counter" if inflight_values else "unavailable",
             "qps_1m_total": "instance_heartbeat" if qps_values else "unavailable",
+            "cache_hit_rate_avg": "instance_cache_metrics" if cache_hit_values else "unavailable",
+            "cache_pressure_score_avg": "instance_cache_metrics" if pressure_values else "unavailable",
             "load_ratio": "derived_from_inflight_capacity" if load_ratio is not None else "unavailable",
             "capacity": "proxy_config",
             "prepare_queue_depth": "proxy_queue_manager" if prepare_queue_depth is not None else "unavailable",
@@ -341,6 +720,8 @@ class InstancePool:
             "load": {
                 "inflight_total": inflight_total,
                 "qps_1m_total": qps_1m_total,
+                "cache_hit_rate_avg": _avg(cache_hit_values),
+                "cache_pressure_score_avg": _avg(pressure_values),
                 "load_ratio": load_ratio,
                 "capacity": effective_capacity,
                 "prepare_queue_depth": prepare_queue_depth,
@@ -543,3 +924,80 @@ def _resource_from_snapshot(snapshot: Dict[str, Any], reported_at: int, metadata
         reported_instance_id=str(metadata.get("reported_instance_id")) if metadata.get("reported_instance_id") is not None else None,
         raw_resource=dict(snapshot) if isinstance(snapshot, dict) else {},
     )
+
+
+def _cache_metrics_from_snapshot(snapshot: Dict[str, Any], reported_at: int, metadata: Dict[str, Any]) -> InstanceCacheMetrics:
+    payload = dict(snapshot) if isinstance(snapshot, dict) else {}
+    status = str(payload.get("status") or metadata.get("status") or "ready").strip().lower() or "ready"
+    return InstanceCacheMetrics(
+        status=status,
+        source=str(metadata.get("source") or payload.get("source") or "lmcache_metrics_adapter"),
+        source_endpoint=str(metadata.get("source_endpoint") or payload.get("source_endpoint")) if (metadata.get("source_endpoint") or payload.get("source_endpoint")) is not None else None,
+        timestamp=_as_int(payload.get("timestamp") or payload.get("timestamp_ms")),
+        last_reported_at=reported_at,
+        fetch_step=str(metadata.get("fetch_step") or payload.get("fetch_step")) if (metadata.get("fetch_step") or payload.get("fetch_step")) is not None else None,
+        detail=str(metadata.get("detail") or payload.get("detail")) if (metadata.get("detail") or payload.get("detail")) is not None else None,
+        hit_rate=_as_float(payload.get("hit_rate")),
+        eviction_rate=_as_float(payload.get("eviction_rate")),
+        store_qps=_as_float(payload.get("store_qps")),
+        retrieve_qps=_as_float(payload.get("retrieve_qps")),
+        lookup_qps=_as_float(payload.get("lookup_qps")),
+        avg_store_latency_ms=_as_float(payload.get("avg_store_latency_ms")),
+        avg_retrieve_latency_ms=_as_float(payload.get("avg_retrieve_latency_ms")),
+        avg_lookup_latency_ms=_as_float(payload.get("avg_lookup_latency_ms")),
+        l1_usage_bytes=_as_float(payload.get("l1_usage_bytes")),
+        l1_capacity_bytes=_as_float(payload.get("l1_capacity_bytes")),
+        l2_usage_bytes=_as_float(payload.get("l2_usage_bytes")),
+        l2_capacity_bytes=_as_float(payload.get("l2_capacity_bytes")),
+        active_sessions=_as_int(payload.get("active_sessions")),
+        pressure_score=_as_float(payload.get("pressure_score")),
+        raw=payload,
+    )
+
+
+def _merge_cache_metrics(prev: InstanceCacheMetrics, current: InstanceCacheMetrics, reported_at: int) -> InstanceCacheMetrics:
+    merged = current
+    merged.last_reported_at = reported_at
+    merged.success_count = int(getattr(prev, "success_count", 0) or 0)
+    merged.error_count = int(getattr(prev, "error_count", 0) or 0)
+    merged.last_success_at = getattr(prev, "last_success_at", None)
+    merged.last_error_at = getattr(prev, "last_error_at", None)
+    merged.last_error = getattr(prev, "last_error", None)
+
+    if merged.status == "ok":
+        merged.success_count += 1
+        merged.last_success_at = reported_at
+        merged.last_error = None
+    elif merged.status == "partial":
+        merged.success_count += 1
+        merged.error_count += 1
+        merged.last_success_at = reported_at
+        merged.last_error_at = reported_at
+        merged.last_error = merged.detail or "partial_payload"
+    else:
+        merged.error_count += 1
+        merged.last_error_at = reported_at
+        merged.last_error = merged.detail or "metrics_fetch_failed"
+
+    for field_name in (
+        "hit_rate",
+        "eviction_rate",
+        "store_qps",
+        "retrieve_qps",
+        "lookup_qps",
+        "avg_store_latency_ms",
+        "avg_retrieve_latency_ms",
+        "avg_lookup_latency_ms",
+        "l1_usage_bytes",
+        "l1_capacity_bytes",
+        "l2_usage_bytes",
+        "l2_capacity_bytes",
+        "active_sessions",
+        "pressure_score",
+    ):
+        if getattr(merged, field_name) is None:
+            setattr(merged, field_name, getattr(prev, field_name, None))
+
+    if not merged.raw and getattr(prev, "raw", None):
+        merged.raw = dict(prev.raw)
+    return merged

@@ -81,6 +81,48 @@ def _read_iface_speed_mbps(iface: str) -> Optional[float]:
         return None
 
 
+def _build_lmcache_adapter_meta() -> Dict[str, Any]:
+    meta: Dict[str, Any] = {"version": "instance_v1"}
+    metrics_urls: List[str] = []
+
+    explicit_metrics_url = os.environ.get("INSTANCE_LMCACHE_METRICS_URL", "").strip()
+    if explicit_metrics_url:
+        metrics_urls.append(_norm_http_base(explicit_metrics_url) or explicit_metrics_url)
+
+    explicit_internal_url = os.environ.get("INSTANCE_LMCACHE_INTERNAL_API_URL", "").strip()
+    if explicit_internal_url:
+        metrics_urls.append(_norm_http_base(explicit_internal_url) or explicit_internal_url)
+
+    vllm_metrics_base = _norm_http_base(vllm_base_url)
+    if vllm_metrics_base:
+        metrics_urls.append(f"{vllm_metrics_base}/metrics")
+
+    internal_host = os.environ.get("LMCACHE_INTERNAL_API_SERVER_HOST", "").strip() or INSTANCE_ADVERTISE_HOST
+    internal_port = os.environ.get("INSTANCE_LMCACHE_INTERNAL_API_PORT", "").strip()
+    if not internal_port:
+        enabled = os.environ.get("LMCACHE_INTERNAL_API_SERVER_ENABLED", "").strip().lower()
+        port_start = os.environ.get("LMCACHE_INTERNAL_API_SERVER_PORT_START", "").strip()
+        if enabled in {"1", "true", "yes", "on"} and port_start.isdigit():
+            internal_port = str(int(port_start) + 1)
+    if internal_host and internal_port.isdigit():
+        metrics_urls.append(f"http://{internal_host}:{int(internal_port)}/metrics")
+        meta["lmcache_internal_api_port"] = int(internal_port)
+        meta["lmcache_metrics_host"] = internal_host
+
+    deduped: List[str] = []
+    seen = set()
+    for item in metrics_urls:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    if deduped:
+        meta["lmcache_metrics_urls"] = deduped
+        meta["lmcache_metrics_url"] = deduped[0]
+    return meta
+
+
 async def _probe_kdn_link(client: ProxyControlClient, instance_id: str, target: str, logger: logging.Logger) -> Optional[Tuple[str, Dict[str, Any]]]:
     base = _norm_http_base(target)
     if not base:
@@ -189,7 +231,7 @@ async def lifespan(app: FastAPI):
             host=INSTANCE_ADVERTISE_HOST,
             port=INSTANCE_ADVERTISE_PORT,
             endpoints=["chat/completions", "completions"],
-            meta={"version": "instance_v1"},
+            meta=_build_lmcache_adapter_meta(),
         )
         runtime_instance_id = reg.instance_id
         interval = float(reg.heartbeat_interval_s) if reg.heartbeat_interval_s else 10.0

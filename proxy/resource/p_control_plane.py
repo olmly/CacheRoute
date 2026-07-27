@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -27,6 +28,7 @@ _unknown_resource_warn_at: Dict[str, float] = {}
 _proxy_id: str = os.environ.get("PROXY_ID", "unknown")
 _proxy_capacity: int = int(os.environ.get("PROXY_MAX_CAPACITY", "0") or 0)
 _queue_snapshot_provider: Optional[Callable[[], Dict[str, Any]]] = None
+_cache_refresh_provider: Optional[Callable[[Optional[List[str]]], Any]] = None
 
 
 def set_pool(pool: InstancePool) -> None:
@@ -44,6 +46,12 @@ def set_queue_snapshot_provider(provider: Optional[Callable[[], Dict[str, Any]]]
     """Register a lazy queue-depth provider without coupling control plane to QueueManager."""
     global _queue_snapshot_provider
     _queue_snapshot_provider = provider
+
+
+def set_cache_refresh_provider(provider: Optional[Callable[[Optional[List[str]]], Any]]) -> None:
+    """Register an optional cache refresh hook owned by the Proxy runtime."""
+    global _cache_refresh_provider
+    _cache_refresh_provider = provider
 
 
 def _build_pool_resource_snapshot() -> Dict[str, Any]:
@@ -101,9 +109,30 @@ class InstanceResourceSnapshotReq(BaseModel):
     metadata: Dict[str, Any] = {}
 
 
+class InstanceCacheMetricsReq(BaseModel):
+    instance_id: str
+    snapshot: Dict[str, Any]
+    metadata: Dict[str, Any] = {}
+
+
+class InstanceCacheDirectoryReq(BaseModel):
+    instance_id: str
+    prefix_key: str
+    chunk_keys: List[str]
+    token_count: Optional[int] = None
+    matched_tokens: Optional[int] = None
+    device: str = "unknown"
+    state: str = "present"
+    last_validated_at: Optional[int] = None
+
+
 class TopologyReportReq(BaseModel):
     instance_id: str
     links: Dict[str, Dict[str, Any]]
+
+
+class CacheRefreshReq(BaseModel):
+    instance_ids: Optional[List[str]] = None
 
 
 async def get_kdn_links_snapshot() -> Dict[str, Dict[str, Any]]:
@@ -230,6 +259,45 @@ async def report_resource_snapshot(req: InstanceResourceSnapshotReq) -> Dict[str
     return {"ok": True}
 
 
+@_control_plane.post("/v1/instance/cache_metrics")
+async def report_cache_metrics(req: InstanceCacheMetricsReq) -> Dict[str, Any]:
+    pool = get_pool()
+    ok = pool.report_cache_metrics(
+        instance_id=req.instance_id,
+        snapshot=req.snapshot,
+        metadata=req.metadata,
+    )
+    if not ok:
+        logger.warning("[ProxyCP] cache metrics for unknown instance_id=%s", req.instance_id)
+        return {"ok": False, "error": "unknown_instance"}
+    logger.debug("[ProxyCP] cache metrics updated: instance_id=%s", req.instance_id)
+    return {"ok": True}
+
+
+@_control_plane.post("/v1/instance/cache_directory")
+async def report_cache_directory(req: InstanceCacheDirectoryReq) -> Dict[str, Any]:
+    pool = get_pool()
+    ok = pool.report_cache_directory(
+        instance_id=req.instance_id,
+        prefix_key=req.prefix_key,
+        chunk_keys=req.chunk_keys,
+        token_count=req.token_count,
+        matched_tokens=req.matched_tokens,
+        device=req.device,
+        state=req.state,
+        last_validated_at=req.last_validated_at,
+    )
+    if not ok:
+        logger.warning(
+            "[ProxyCP] cache directory update rejected: instance_id=%s prefix_key=%s chunks=%s",
+            req.instance_id,
+            req.prefix_key,
+            len(req.chunk_keys or []),
+        )
+        return {"ok": False, "error": "invalid_update_or_unknown_instance"}
+    return {"ok": True}
+
+
 @_control_plane.post("/v1/instance/unregister")
 async def unregister(req: InstanceUnregisterReq) -> Dict[str, Any]:
     pool = get_pool()
@@ -263,6 +331,34 @@ async def list_instances(include_dead: bool = False) -> List[Dict[str, Any]]:
                 "inflight": it.load.inflight,
                 "qps_1m": it.load.qps_1m,
                 "gpu_util": it.load.gpu_util,
+            },
+            "cache_metrics": {
+                "status": it.cache_metrics.status,
+                "source": it.cache_metrics.source,
+                "source_endpoint": it.cache_metrics.source_endpoint,
+                "timestamp": it.cache_metrics.timestamp,
+                "last_reported_at": it.cache_metrics.last_reported_at,
+                "last_success_at": it.cache_metrics.last_success_at,
+                "last_error_at": it.cache_metrics.last_error_at,
+                "success_count": it.cache_metrics.success_count,
+                "error_count": it.cache_metrics.error_count,
+                "last_error": it.cache_metrics.last_error,
+                "fetch_step": it.cache_metrics.fetch_step,
+                "detail": it.cache_metrics.detail,
+                "hit_rate": it.cache_metrics.hit_rate,
+                "eviction_rate": it.cache_metrics.eviction_rate,
+                "store_qps": it.cache_metrics.store_qps,
+                "retrieve_qps": it.cache_metrics.retrieve_qps,
+                "lookup_qps": it.cache_metrics.lookup_qps,
+                "avg_store_latency_ms": it.cache_metrics.avg_store_latency_ms,
+                "avg_retrieve_latency_ms": it.cache_metrics.avg_retrieve_latency_ms,
+                "avg_lookup_latency_ms": it.cache_metrics.avg_lookup_latency_ms,
+                "l1_usage_bytes": it.cache_metrics.l1_usage_bytes,
+                "l1_capacity_bytes": it.cache_metrics.l1_capacity_bytes,
+                "l2_usage_bytes": it.cache_metrics.l2_usage_bytes,
+                "l2_capacity_bytes": it.cache_metrics.l2_capacity_bytes,
+                "active_sessions": it.cache_metrics.active_sessions,
+                "pressure_score": it.cache_metrics.pressure_score,
             },
             "resource": {
                 "cpu_util": it.resource.cpu_util,
@@ -368,6 +464,67 @@ async def debug_instance_loads(include_dead: bool = True) -> Dict[str, Any]:
             )
     snapshot = pool.snapshot_instance_loads(queue_depths=queue_depths, include_dead=include_dead)
     return {"ok": True, **snapshot}
+
+
+@_control_plane.get("/debug/cache_metrics")
+async def debug_cache_metrics(include_dead: bool = True) -> Dict[str, Any]:
+    pool = get_pool()
+    snapshot = pool.snapshot_cache_metrics(include_dead=include_dead)
+    return {"ok": True, **snapshot}
+
+
+@_control_plane.get("/debug/cache/instances")
+async def debug_cache_instances(include_dead: bool = True) -> Dict[str, Any]:
+    pool = get_pool()
+    snapshot = pool.snapshot_cache_instances(include_dead=include_dead)
+    return {"ok": True, **snapshot}
+
+
+@_control_plane.get("/debug/cache/summary")
+async def debug_cache_summary(include_dead: bool = True) -> Dict[str, Any]:
+    pool = get_pool()
+    snapshot = pool.snapshot_cache_summary(include_dead=include_dead)
+    return {"ok": True, **snapshot}
+
+
+@_control_plane.post("/debug/cache/refresh")
+async def debug_cache_refresh(req: CacheRefreshReq) -> Dict[str, Any]:
+    if _cache_refresh_provider is None:
+        return {"ok": False, "error": "cache_refresh_unavailable"}
+    result = _cache_refresh_provider(req.instance_ids)
+    if inspect.isawaitable(result):
+        result = await result
+    return result if isinstance(result, dict) else {"ok": True, "result": result}
+
+
+@_control_plane.get("/debug/cache_directory")
+async def debug_cache_directory(include_dead: bool = True) -> Dict[str, Any]:
+    pool = get_pool()
+    snapshot = pool.snapshot_cache_directory(include_dead=include_dead)
+    return {"ok": True, **snapshot}
+
+
+@_control_plane.get("/debug/cache_prefix/{prefix_key}")
+async def debug_cache_prefix(prefix_key: str, include_dead: bool = True) -> Dict[str, Any]:
+    pool = get_pool()
+    matches = pool.lookup_prefix(prefix_key, include_dead=include_dead)
+    return {
+        "ok": True,
+        "prefix_key": prefix_key,
+        "matches": [
+            {
+                "instance_id": item.instance_id,
+                "matched_chunks": item.matched_chunks,
+                "total_chunks": item.total_chunks,
+                "matched_tokens": item.matched_tokens,
+                "residency_score": item.residency_score,
+                "devices": item.devices,
+                "last_seen_at": item.last_seen_at,
+            }
+            for item in matches
+        ],
+    }
+
 
 @_control_plane.post("/v1/topology/report")
 async def report_topology(req: TopologyReportReq) -> Dict[str, Any]:

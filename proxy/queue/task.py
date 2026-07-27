@@ -52,6 +52,9 @@ class ProxyTask:
 
     kv_ack: Dict[str, Any] = field(default_factory=dict)
     trace: Dict[str, int] = field(default_factory=dict)
+    cache_lookup: Dict[str, Any] = field(default_factory=dict)
+    route_score_breakdown: Dict[str, Any] = field(default_factory=dict)
+    prefix_key: Optional[str] = None
 
     # reservation state for ready/prefill timeline
     # prediction stage: "prefill" (default) or "decode" (reserved for future modeling)
