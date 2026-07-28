@@ -101,10 +101,10 @@ RUN python3 -m pip install --no-cache-dir \
         torchvision==0.26.0 \
         torchaudio==2.11.0
 
-RUN python3 -m pip install --no-cache-dir \
-        -c /opt/cacheroute/constraints.txt \
-        vllm==0.25.1 \
-        lmcache==0.5.2
+#RUN python3 -m pip install --no-cache-dir \
+ #-c /opt/cacheroute/constraints.txt \
+  #      vllm==0.25.1 \
+   #     lmcache==0.5.2
 
 RUN python3 -m pip install --no-cache-dir \
         -c /opt/cacheroute/constraints.txt \
@@ -112,9 +112,9 @@ RUN python3 -m pip install --no-cache-dir \
 
 # Validate metadata and real imports. Build steps normally do not receive GPUs,
 # so torch.cuda.is_available() is intentionally checked only at container run time.
-RUN python3 -m pip check && \
-    python3 -c 'from importlib.metadata import version; import sys; import redis; import torch; import torchcodec; import vllm; import lmcache; print("Python serving environment:"); print("python:", sys.version); print("torch:", torch.__version__); print("torch CUDA:", torch.version.cuda); print("vllm:", version("vllm")); print("lmcache:", version("lmcache")); print("transformers:", version("transformers")); print("redis:", version("redis")); print("torchcodec:", version("torchcodec"))'
+#RUN python3 -m pip check && \
+ #   python3 -c 'from importlib.metadata import version; import sys; import redis; import torch; import torchcodec; import vllm; import lmcache; print("Python serving environment:"); print("python:", sys.version); print("torch:", torch.__version__); print("torch CUDA:", torch.version.cuda); print("vllm:", version("vllm")); print("lmcache:", version("lmcache")); print("transformers:", version("transformers")); print("redis:", version("redis")); print("torchcodec:", version("torchcodec"))'
 
-WORKDIR /workspace/llm-stack/CacheRoute
+WORKDIR /workspace/llm-stack/CacheRoute-wangchen
 
 CMD ["sleep", "infinity"]

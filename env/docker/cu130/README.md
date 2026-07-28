@@ -405,3 +405,42 @@ The modern environment profile is additive. The legacy Dockerfile, root
 `requirements.txt`, Scheduler routing, and stable legacy runtime remain
 unchanged. Subsequent Scheduler, Proxy, Instance, predictor, and UI development
 can use this v1 stack as the modern baseline.
+
+## 从源码构建vllm lmcache
+
+```
+#启动容器，在容器中操作
+mkdir -p /llm-stack/src
+cd /llm-stack/src
+
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+git checkout v0.25.1
+export VLLM_USE_PRECOMPILED=1
+pip install -e .
+
+cd /llm-stack/src
+git clone https://github.com/LMCache/LMCache.git
+cd LMCache
+git checkout v0.5.2
+pip install -r requirements/build.txt
+pip install -e . --no-build-isolation
+```
+### 可能遇到的问题
+1、在git checkout中遇到git保护目录：
+
+```
+#把相关目录加入 safe.directory
+git config --global --add safe.directory /workspace/llm-stack/src/0.5.2lmcache-0.25.1vllm/vllm
+git config --global --add safe.directory /workspace/llm-stack/src/0.5.2lmcache-0.25.1vllm/LMCache
+```
+后续可以在dockerfile中，初始化指定用户zkgy
+2、在构建源码时保证nvidia驱动可用，如果不可用我们可以显式指定
+```
+export TORCH_CUDA_ARCH_LIST="9.0"
+#常见GPU对应值
+# A100: 8.0
+# H100/H20: 9.0
+# L40S/4090: 8.9
+# 5090:12.0
+```
