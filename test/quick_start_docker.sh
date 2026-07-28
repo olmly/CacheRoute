@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VLLM_C="vllm_lmcache_test"
+VLLM_C="cacheroute-dev-cu130"
 REDIS_C="lmcache-redis"
 
 GS_SCHEMA="org.gnome.Terminal.Legacy.Settings"
 GS_KEY="new-terminal-mode"
 
-# Temporarily set "new terminal behavior" to tab so --tab is always added to the current window
+# 临时把“新终端行为”设为 tab，保证 --tab 一定加到当前窗口
 ORIG_MODE="$(gsettings get ${GS_SCHEMA} ${GS_KEY})"
 gsettings set ${GS_SCHEMA} ${GS_KEY} 'tab'
 trap 'gsettings set '"${GS_SCHEMA}"' '"${GS_KEY}"' '"${ORIG_MODE}"' >/dev/null 2>&1 || true' EXIT
@@ -15,12 +15,12 @@ trap 'gsettings set '"${GS_SCHEMA}"' '"${GS_KEY}"' '"${ORIG_MODE}"' >/dev/null 2
 echo "[1/3] Restart ${VLLM_C}"
 docker restart "${VLLM_C}" >/dev/null
 
-echo "[2/3] Open 6 vllm tabs in current window"
+echo "[2/3] Open 7 vllm tabs in current window"
 
-for i in {1..6}; do
+for i in {1..7}; do
   gnome-terminal \
     --tab --title="vllm #${i}" \
-    -- bash -lc "docker exec -it ${VLLM_C} bash -lc 'cd llm-stack/CacheRoute/test && exec bash'"
+    -- bash -lc "docker exec -it ${VLLM_C} bash -lc 'cd /workspace/llm-stack/CacheRoute-wangchen/test && exec bash'"
   sleep 0.3
 done
 
@@ -32,3 +32,4 @@ gnome-terminal \
   -- bash -lc "docker exec -it ${REDIS_C} redis-cli < /dev/tty"
 
 echo "Done."
+
