@@ -33,7 +33,7 @@ The serving commands are part of the runtime compatibility contract:
 | Profile | LMCache process | vLLM connector path |
 |---|---|---|
 | `legacy` | YAML selected by `LMCACHE_CONFIG_FILE` | historical LMCache offloading arguments |
-| `v1` | standalone `lmcache server` with RESP L2 | `vllm serve` with `LMCacheMPConnector` in `--kv-transfer-config` |
+| `v1` | standalone `lmcache server` with MP L1/L2 | `vllm serve` with `LMCacheMPConnector` in `--kv-transfer-config` |
 
 Do not mix the interfaces. The v1 path must not depend on `remote_url`,
 `LMCACHE_CONFIG_FILE`, or `--kv-offloading-backend lmcache`.
@@ -41,7 +41,7 @@ Do not mix the interfaces. The v1 path must not depend on `remote_url`,
 The validated v1 startup order is:
 
 ```text
-Redis RESP L2 -> LMCache MP :5555 -> vLLM :8000 -> CacheRoute components
+LMCache L2 backend(s) -> LMCache MP -> vLLM -> CacheRoute components
 ```
 
 Complete commands and overrides are documented in
@@ -71,7 +71,7 @@ removes its partial output, and is never marked `kv_ready`.
 The stable legacy path remains:
 
 ```text
-CUDA 12.8 / PyTorch 2.9.x / vLLM 0.13.x / LMCache 0.3.11
+vLLM <-> LMCacheMPConnector <-> LMCache MP L1/L2
 ```
 
 Use `CACHEROUTE_RUNTIME_PROFILE=legacy` for strict historical Redis-key
