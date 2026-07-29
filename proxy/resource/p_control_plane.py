@@ -29,6 +29,8 @@ _proxy_id: str = os.environ.get("PROXY_ID", "unknown")
 _proxy_capacity: int = int(os.environ.get("PROXY_MAX_CAPACITY", "0") or 0)
 _queue_snapshot_provider: Optional[Callable[[], Dict[str, Any]]] = None
 _cache_refresh_provider: Optional[Callable[[Optional[List[str]]], Any]] = None
+_cache_query_provider: Optional[Any] = None
+_cache_subscriber_state_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
 
 def set_pool(pool: InstancePool) -> None:
@@ -52,6 +54,18 @@ def set_cache_refresh_provider(provider: Optional[Callable[[Optional[List[str]]]
     """Register an optional cache refresh hook owned by the Proxy runtime."""
     global _cache_refresh_provider
     _cache_refresh_provider = provider
+
+
+def set_cache_query_provider(provider: Optional[Any]) -> None:
+    """注册缓存查询服务，debug API 只通过这个读接口访问可见性索引。"""
+    global _cache_query_provider
+    _cache_query_provider = provider
+
+
+def set_cache_subscriber_state_provider(provider: Optional[Callable[[], Dict[str, Any]]]) -> None:
+    """注册 ZMQ 订阅状态提供器，便于开发期验证订阅链路。"""
+    global _cache_subscriber_state_provider
+    _cache_subscriber_state_provider = provider
 
 
 def _build_pool_resource_snapshot() -> Dict[str, Any]:
@@ -485,6 +499,41 @@ async def debug_cache_summary(include_dead: bool = True) -> Dict[str, Any]:
     pool = get_pool()
     snapshot = pool.snapshot_cache_summary(include_dead=include_dead)
     return {"ok": True, **snapshot}
+
+
+@_control_plane.get("/debug/cache/index_stats")
+async def debug_cache_index_stats() -> Dict[str, Any]:
+    if _cache_query_provider is None:
+        return {"ok": False, "error": "cache_query_unavailable"}
+    return {"ok": True, "stats": _cache_query_provider.get_index_stats()}
+
+
+@_control_plane.get("/debug/cache/instance/{instance_id}")
+async def debug_cache_instance_summary(instance_id: str, namespace: Optional[str] = None) -> Dict[str, Any]:
+    if _cache_query_provider is None:
+        return {"ok": False, "error": "cache_query_unavailable"}
+    return {"ok": True, **_cache_query_provider.get_instance_summary(instance_id=instance_id, namespace=namespace)}
+
+
+@_control_plane.get("/debug/cache/chunk/{chunk_key}")
+async def debug_cache_chunk_locations(chunk_key: str, namespace: str) -> Dict[str, Any]:
+    if _cache_query_provider is None:
+        return {"ok": False, "error": "cache_query_unavailable"}
+    return {"ok": True, **_cache_query_provider.get_chunk_locations(namespace=namespace, chunk_key=chunk_key)}
+
+
+@_control_plane.get("/debug/cache/namespace/{namespace}")
+async def debug_cache_namespace_summary(namespace: str) -> Dict[str, Any]:
+    if _cache_query_provider is None:
+        return {"ok": False, "error": "cache_query_unavailable"}
+    return {"ok": True, **_cache_query_provider.get_namespace_summary(namespace=namespace)}
+
+
+@_control_plane.get("/debug/cache/subscriber_state")
+async def debug_cache_subscriber_state() -> Dict[str, Any]:
+    if _cache_subscriber_state_provider is None:
+        return {"ok": False, "error": "cache_subscriber_unavailable"}
+    return {"ok": True, "subscriber": _cache_subscriber_state_provider()}
 
 
 @_control_plane.post("/debug/cache/refresh")

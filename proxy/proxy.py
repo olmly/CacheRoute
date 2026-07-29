@@ -35,7 +35,14 @@ from core import forward_request
 from core import config
 
 from proxy.sclient.scheduler_client import SchedulerControlClient
-from proxy.cache import build_prefix_key, LMCacheMetricsPoller
+from proxy.cache import (
+    CacheQueryService,
+    CacheVisibilityIndex,
+    LMCacheMetricsPoller,
+    ZMQCacheSubscriber,
+    adapt_raw_event,
+    build_prefix_key,
+)
 from proxy.resource.instance_pool import InstancePool
 from proxy.resource import p_control_plane
 from proxy.resource.hb_log import HeartbeatReporter, hb_report_loop
@@ -106,6 +113,43 @@ def _build_pool_resource_snapshot(app: FastAPI) -> Dict[str, Any]:
     )
 
 
+def _build_cache_namespace(req_obj: SchedulerRequest) -> str:
+    # 中文注释：第一阶段先使用模型名 + 注入模式构造 namespace，给后续 tokenizer/version 细化预留位置。
+    prompt = getattr(req_obj, "Prompt", None)
+    service = getattr(req_obj, "Service", None)
+    model = str(getattr(prompt, "model", "") or "unknown_model").strip()
+    injection_type = str(getattr(service, "Injection_type", "kvcache") or "kvcache").strip().lower()
+    return f"{model}::default_tokenizer::{injection_type}"
+
+
+async def _handle_cache_visibility_message(app: FastAPI, raw_message: Any) -> None:
+    """写路径：ZMQ 原始消息 -> 适配器 -> 本地可见性索引。"""
+    result = adapt_raw_event(raw_message)
+    if not result.ok or result.event is None:
+        logger.warning("[Proxy][CacheZMQ] skip malformed event error=%s raw=%s", result.error, result.raw_summary)
+        return
+
+    event = result.event
+    try:
+        update = app.state.cache_visibility_index.apply_event(event)  # type: ignore
+    except Exception as exc:
+        logger.warning(
+            "[Proxy][CacheZMQ] index update failed namespace=%s instance=%s type=%s err=%s",
+            event.namespace,
+            event.instance_id,
+            event.event_type,
+            exc,
+        )
+        return
+
+    # 中文注释：第一次成功事件用 INFO，后续高频事件降到 DEBUG，避免刷屏。
+    if getattr(app.state, "_cache_event_logged_once", False):  # type: ignore
+        logger.debug("[Proxy][CacheZMQ] event applied summary=%s", update)
+    else:
+        app.state._cache_event_logged_once = True  # type: ignore
+        logger.info("[Proxy][CacheZMQ] first normalized event applied summary=%s", update)
+
+
 def _squelch_noisy_loggers():
     # http client
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -136,8 +180,16 @@ async def lifespan(app: FastAPI):
     p_control_plane.set_pool(app.state.instance_pool)  # type: ignore
     p_control_plane.set_pool_resource_context(PROXY_ID, PROXY_MAX_CAPACITY)
     p_control_plane.set_queue_snapshot_provider(lambda: queue_mgr.queue_pressure_snapshot())
+    app.state.cache_visibility_index = CacheVisibilityIndex()  # type: ignore
+    app.state.cache_query_service = CacheQueryService(app.state.cache_visibility_index)  # type: ignore
+    p_control_plane.set_cache_query_provider(app.state.cache_query_service)  # type: ignore
     app.state.cache_metrics_poller = LMCacheMetricsPoller(app.state.instance_pool, logger_=logger)  # type: ignore
     p_control_plane.set_cache_refresh_provider(app.state.cache_metrics_poller.refresh)  # type: ignore
+    app.state.cache_zmq_subscriber = ZMQCacheSubscriber(  # type: ignore
+        on_message=lambda raw: _handle_cache_visibility_message(app, raw),
+        logger_=logger,
+    )
+    p_control_plane.set_cache_subscriber_state_provider(app.state.cache_zmq_subscriber.snapshot_state)  # type: ignore
 
     # --- Load the proxy scheduling strategy for the data plane ---
     strategy_name = os.environ.get("PROXY_INSTANCE_STRATEGY", "round_robin")
@@ -241,9 +293,17 @@ async def lifespan(app: FastAPI):
     app.state._cache_metrics_task = asyncio.create_task(  # type: ignore
         app.state.cache_metrics_poller.run_forever(app.state._hb_stop)  # type: ignore
     )
+    app.state._cache_zmq_task = asyncio.create_task(  # type: ignore
+        app.state.cache_zmq_subscriber.run_forever(app.state._hb_stop)  # type: ignore
+    )
     logger.info(
         "[Proxy][LMCache] metrics poller started interval=%ss",
         getattr(app.state.cache_metrics_poller, "interval_s", "?"),
+    )
+    logger.info(
+        "[Proxy][CacheZMQ] subscriber enabled=%s endpoint=%s",
+        getattr(app.state.cache_zmq_subscriber, "enabled", False),
+        getattr(app.state.cache_zmq_subscriber, "snapshot_state", lambda: {})().get("endpoint"),
     )
 
     try:
@@ -274,6 +334,9 @@ async def lifespan(app: FastAPI):
             cache_task = getattr(app.state, "_cache_metrics_task", None)  # type: ignore
             if cache_task:
                 cache_task.cancel()
+            zmq_task = getattr(app.state, "_cache_zmq_task", None)  # type: ignore
+            if zmq_task:
+                zmq_task.cancel()
             rpt = getattr(app.state, "_hb_report_task", None)  # type: ignore
             if rpt:
                 rpt.cancel()
@@ -463,12 +526,19 @@ def _build_cache_lookup(pool: InstancePool, req_obj: SchedulerRequest) -> Dict[s
     if not knowledge_ids:
         return {"enabled": False, "reason": "no_knowledge_ids", "matches": []}
     prefix_key = build_prefix_key(model=model, knowledge_ids=knowledge_ids, injection_type=injection_type)
-    matches = pool.lookup_prefix(prefix_key, include_dead=False)
+    namespace = _build_cache_namespace(req_obj)
+    query_service = getattr(proxy.state, "cache_query_service", None)  # type: ignore
+    if query_service is not None:
+        lookup = query_service.lookup_prefix(namespace=namespace, prefix_key=prefix_key)
+        matches = lookup.get("matches", [])
+    else:
+        matches = pool.lookup_prefix(prefix_key, include_dead=False)
     return {
         "enabled": True,
+        "namespace": namespace,
         "prefix_key": prefix_key,
         "knowledge_ids": [str(item) for item in knowledge_ids],
-        "matches": [
+        "matches": matches if isinstance(matches, list) else [
             {
                 "instance_id": item.instance_id,
                 "matched_chunks": item.matched_chunks,
