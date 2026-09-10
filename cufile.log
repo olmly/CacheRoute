@@ -1,0 +1,9 @@
+ 08-09-2026 08:21:00:503 [pid=209820 tid=209820] NOTICE  cufio-drv:851 running in compatible mode
+ 08-09-2026 08:21:02:468 [pid=209820 tid=209820] ERROR  cufio-fs:328 error creating udev_device for block device dev_no: 0:91
+ 08-09-2026 08:21:02:468 [pid=209820 tid=209820] ERROR  cufio-fs:777 error getting volume attributes error for device: dev_no: 0:91
+ 08-09-2026 08:21:02:468 [pid=209820 tid=209820] NOTICE  cufio:285 cuFileHandleRegister GDS not supported or disabled by config, using cuFile posix read/write with compat mode enabled
+ 08-09-2026 08:21:02:468 [pid=209820 tid=209820] ERROR  cufio-fs:328 error creating udev_device for block device dev_no: 0:91
+ 08-09-2026 08:21:02:468 [pid=209820 tid=209820] ERROR  cufio-fs:777 error getting volume attributes error for device: dev_no: 0:91
+ 08-09-2026 08:21:02:468 [pid=209820 tid=209820] ERROR  cufio-obj:242 unable to get volume attributes for fd 80
+ 08-09-2026 08:21:02:468 [pid=209820 tid=209820] ERROR  cufio:303 cuFileHandleRegister error, failed to allocate file object
+ 08-09-2026 08:21:02:468 [pid=209820 tid=209820] ERROR  cufio:331 cuFileHandleRegister error: file descriptor is not registered

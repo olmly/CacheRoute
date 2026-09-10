@@ -444,3 +444,18 @@ export TORCH_CUDA_ARCH_LIST="9.0"
 # L40S/4090: 8.9
 # 5090:12.0
 ```
+3、安装常见的构建工具
+pip install setuptools-rust wheel packaging ninja cmake
+
+4、锁死版本控制：
+pip install --force-reinstall \
+  "setuptools>=77.0.3,<81.0.0" \
+  "opentelemetry-api==1.40.0" \
+  "opentelemetry-sdk==1.40.0" \
+  "opentelemetry-exporter-otlp==1.40.0" \
+  "opentelemetry-exporter-otlp-proto-common==1.40.0" \
+  "opentelemetry-exporter-otlp-proto-grpc==1.40.0" \
+  "opentelemetry-exporter-otlp-proto-http==1.40.0" \
+  "opentelemetry-exporter-prometheus==0.61b0" \
+  "prometheus-client==0.24.1"
+pip check

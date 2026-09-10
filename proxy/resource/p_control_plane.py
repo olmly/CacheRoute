@@ -32,6 +32,7 @@ _proxy_capacity: int = int(os.environ.get("PROXY_MAX_CAPACITY", "0") or 0)
 _queue_snapshot_provider: Optional[Callable[[], Dict[str, Any]]] = None
 _cache_refresh_provider: Optional[Callable[[Optional[List[str]]], Any]] = None
 _cache_query_provider: Optional[Any] = None
+_cache_instance_purge_provider: Optional[Callable[[str], int]] = None
 _cache_subscriber_state_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
 
@@ -62,6 +63,12 @@ def set_cache_query_provider(provider: Optional[Any]) -> None:
     """注册缓存查询服务，debug API 只通过这个读接口访问可见性索引。"""
     global _cache_query_provider
     _cache_query_provider = provider
+
+
+def set_cache_instance_purge_provider(provider: Optional[Callable[[str], int]]) -> None:
+    """Register the cache-index cleanup hook used when an instance restarts."""
+    global _cache_instance_purge_provider
+    _cache_instance_purge_provider = provider
 
 
 def set_cache_subscriber_state_provider(provider: Optional[Callable[[], Dict[str, Any]]]) -> None:
@@ -108,6 +115,8 @@ class InstanceRegisterReq(BaseModel):
     meta: Dict[str, Any] = Field(default_factory=dict)
     capabilities: Optional[InstanceCapability] = None
     capability_fingerprint: Optional[str] = None
+    boot_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    state: str = Field(default="ready", pattern="^(starting|ready|draining)$")
 
 
 class InstanceHeartbeatReq(BaseModel):
@@ -117,6 +126,8 @@ class InstanceHeartbeatReq(BaseModel):
     gpu_util: Optional[float] = None
     capabilities: Optional[InstanceCapability] = None
     capability_fingerprint: Optional[str] = None
+    boot_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    state: Optional[str] = Field(default=None, pattern="^(starting|ready|draining)$")
 
 
 class InstanceUnregisterReq(BaseModel):
@@ -153,6 +164,15 @@ class TopologyReportReq(BaseModel):
 
 class CacheRefreshReq(BaseModel):
     instance_ids: Optional[List[str]] = None
+
+
+class LongestPrefixLookupReq(BaseModel):
+    """Ordered cache blocks for one request prefix."""
+
+    namespace: str = Field(min_length=1)
+    chunk_keys: List[str] = Field(min_length=1)
+    prefix_key: Optional[str] = None
+    include_unregistered: bool = False
 
 
 async def get_kdn_links_snapshot() -> Dict[str, Dict[str, Any]]:
@@ -217,6 +237,9 @@ async def debug_status() -> Dict[str, Any]:
 async def register(req: InstanceRegisterReq) -> Dict[str, Any]:
     pool = get_pool()
     instance_id = req.instance_id or f"hp_{req.host}:{req.port}"
+    previous = next((item for item in pool.list(include_dead=True) if item.instance_id == instance_id), None)
+    previous_boot_id = previous.boot_id if previous is not None else None
+    boot_changed = bool(previous_boot_id and req.boot_id and previous_boot_id != req.boot_id)
     it = pool.upsert(
         instance_id=instance_id,
         host=req.host,
@@ -226,11 +249,18 @@ async def register(req: InstanceRegisterReq) -> Dict[str, Any]:
         weight=req.weight,
         meta=req.meta,
         capabilities=req.capabilities,
+        boot_id=req.boot_id,
+        state=req.state,
     )
 
+    purged_chunks = 0
+    if boot_changed and _cache_instance_purge_provider is not None:
+        purged_chunks = _cache_instance_purge_provider(instance_id)
+        logger.info("[ProxyCP] instance restart: id=%s old_boot_id=%s new_boot_id=%s purged_chunks=%s", instance_id, previous_boot_id, req.boot_id, purged_chunks)
+
     logger.info(
-        "[ProxyCP] instance register: id=%s addr=%s:%s endpoints=%s tags=%s weight=%s meta=%s",
-        it.instance_id, it.host, it.port, it.endpoints, it.tags, it.weight, it.meta
+        "[ProxyCP] instance register: id=%s addr=%s:%s state=%s boot_id=%s endpoints=%s tags=%s weight=%s meta=%s",
+        it.instance_id, it.host, it.port, it.state, it.boot_id, it.endpoints, it.tags, it.weight, it.meta
     )
 
     # Suggest an instance heartbeat interval: fixed 10s or ttl/3, whichever is smaller
@@ -253,6 +283,8 @@ async def heartbeat(req: InstanceHeartbeatReq) -> Dict[str, Any]:
         gpu_util=req.gpu_util,
         capabilities=req.capabilities,
         capability_fingerprint_value=req.capability_fingerprint,
+        boot_id=req.boot_id,
+        state=req.state,
     )
     if not result.ok:
         logger.warning(
@@ -330,10 +362,11 @@ async def report_cache_directory(req: InstanceCacheDirectoryReq) -> Dict[str, An
 async def unregister(req: InstanceUnregisterReq) -> Dict[str, Any]:
     pool = get_pool()
     ok = pool.remove(req.instance_id)
+    purged_chunks = _cache_instance_purge_provider(req.instance_id) if _cache_instance_purge_provider else 0
     async with _kdn_links_lock:
         _instance_kdn_links.pop(req.instance_id, None)
         _rebuild_best_kdn_links_locked()
-    logger.info("[ProxyCP] instance unregister: id=%s ok=%s", req.instance_id, ok)
+    logger.info("[ProxyCP] instance unregister: id=%s ok=%s purged_chunks=%s", req.instance_id, ok, purged_chunks)
     return {"ok": ok}
 
 
@@ -355,6 +388,8 @@ async def list_instances(include_dead: bool = False) -> List[Dict[str, Any]]:
             "meta": it.meta,
             "capabilities": it.capabilities.model_dump(mode="json") if it.capabilities else None,
             "capability_fingerprint": it.capability_fingerprint,
+            "boot_id": it.boot_id,
+            "state": it.state,
             "registered_at": it.registered_at,
             "last_seen_at": it.last_seen_at,
             "load": {
@@ -524,6 +559,17 @@ async def debug_cache_index_stats() -> Dict[str, Any]:
     return {"ok": True, "stats": _cache_query_provider.get_index_stats()}
 
 
+@_control_plane.get("/debug/cache/chunks")
+async def debug_cache_chunks(
+    namespace: Optional[str] = None,
+    instance_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List chunk keys currently retained by the Proxy visibility index."""
+    if _cache_query_provider is None:
+        return {"ok": False, "error": "cache_query_unavailable"}
+    return {"ok": True, **_cache_query_provider.list_chunks(namespace=namespace, instance_id=instance_id)}
+
+
 @_control_plane.get("/debug/cache/instance/{instance_id}")
 async def debug_cache_instance_summary(instance_id: str, namespace: Optional[str] = None) -> Dict[str, Any]:
     if _cache_query_provider is None:
@@ -560,6 +606,64 @@ async def debug_cache_refresh(req: CacheRefreshReq) -> Dict[str, Any]:
     if inspect.isawaitable(result):
         result = await result
     return result if isinstance(result, dict) else {"ok": True, "result": result}
+
+
+@_control_plane.post("/v1/cache/longest-prefix-lookup")
+async def lookup_longest_prefix(req: LongestPrefixLookupReq) -> Dict[str, Any]:
+    """Return cache matches, optionally limited to live registered instances."""
+    if _cache_query_provider is None:
+        return {"ok": False, "error": "cache_query_unavailable"}
+
+    namespace = req.namespace.strip()
+    chunk_keys = [str(chunk_key).strip() for chunk_key in req.chunk_keys if str(chunk_key).strip()]
+    if not chunk_keys:
+        return {"ok": False, "error": "empty_chunk_keys"}
+
+    lookup = _cache_query_provider.lookup_longest_prefix(
+        namespace=namespace,
+        chunk_keys=chunk_keys,
+        prefix_key=req.prefix_key,
+    )
+    cache_matches = list(lookup.get("matches", []))
+    live_instances = {item.instance_id: item for item in get_pool().list(include_dead=False)}
+
+    routable_matches: List[Dict[str, Any]] = []
+    unroutable_instance_ids: List[str] = []
+    for match in cache_matches:
+        instance_id = str(match.get("instance_id", ""))
+        instance = live_instances.get(instance_id)
+        if instance is None:
+            unroutable_instance_ids.append(instance_id)
+            continue
+        routable_matches.append(
+            {
+                **match,
+                "host": instance.host,
+                "port": instance.port,
+                "endpoints": list(instance.endpoints),
+            }
+        )
+
+    matches = cache_matches if req.include_unregistered else routable_matches
+
+    logger.info(
+        "[ProxyCP] longest prefix lookup namespace=%s chunks=%s cache_matches=%s routable_matches=%s",
+        namespace,
+        len(chunk_keys),
+        len(cache_matches),
+        len(routable_matches),
+    )
+    return {
+        "ok": True,
+        "namespace": lookup.get("namespace", namespace),
+        "prefix_key": lookup.get("prefix_key", req.prefix_key),
+        "chunk_keys": lookup.get("chunk_keys", chunk_keys),
+        "match_strategy": lookup.get("match_strategy", "longest_consecutive_prefix"),
+        "matches": matches,
+        "cache_match_count": len(cache_matches),
+        "routable_match_count": len(routable_matches),
+        "unroutable_instance_ids": sorted(set(unroutable_instance_ids)),
+    }
 
 
 @_control_plane.get("/debug/cache_directory")

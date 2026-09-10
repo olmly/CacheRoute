@@ -1,0 +1,61 @@
+{
+  "run_id": "20260903T074554Z",
+  "timestamp_utc": "2026-09-03T07:46:55.107909+00:00",
+  "base_url": "http://127.0.0.1:8000",
+  "model": "llama-3-70b-instruct",
+  "requests": 100,
+  "concurrency": 16,
+  "max_tokens": 64,
+  "prompt_characters": null,
+  "workload_file": "results/workloads/mixed-100.jsonl",
+  "workload_counts": {
+    "shared_rag": 20,
+    "long_agent": 10,
+    "short_chat": 70
+  },
+  "workload_plan": {
+    "shared_rag": {
+      "requests": 20,
+      "prompt_characters_min": 36911,
+      "prompt_characters_max": 36912,
+      "requested_max_tokens": [
+        256
+      ]
+    },
+    "long_agent": {
+      "requests": 10,
+      "prompt_characters_min": 37017,
+      "prompt_characters_max": 37017,
+      "requested_max_tokens": [
+        512
+      ]
+    },
+    "short_chat": {
+      "requests": 70,
+      "prompt_characters_min": 76,
+      "prompt_characters_max": 87,
+      "requested_max_tokens": [
+        128
+      ]
+    }
+  },
+  "total_prompt_tokens": 206300,
+  "total_completion_tokens": 19200,
+  "wall_s": 60.9894,
+  "succeeded": 100,
+  "failed": 0,
+  "request_throughput_rps": 1.6396,
+  "generation_throughput_tokens_s": 314.809,
+  "ttft_ms": {
+    "p50": 142.28,
+    "p90": 10107.57,
+    "p95": 10109.8,
+    "p99": 10112.83
+  },
+  "tpot_ms": {
+    "p50": 31.27,
+    "p90": 32.94,
+    "p95": 33.12,
+    "p99": 33.14
+  }
+}

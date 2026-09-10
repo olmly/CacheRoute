@@ -26,13 +26,18 @@ class ZMQCacheSubscriber:
     ) -> None:
         self._on_message = on_message
         self._logger = logger_ or logger
-        self._endpoint = os.environ.get("PROXY_CACHE_ZMQ_ENDPOINT", "").strip()
+        raw_endpoints = os.environ.get("PROXY_CACHE_ZMQ_ENDPOINTS", "").strip()
+        if not raw_endpoints:
+            raw_endpoints = os.environ.get("PROXY_CACHE_ZMQ_ENDPOINT", "").strip()
+        self._endpoints = tuple(item.strip() for item in raw_endpoints.split(",") if item.strip())
         self._topic = os.environ.get("PROXY_CACHE_ZMQ_TOPIC", "").encode("utf-8")
         self._reconnect_delay_s = max(1.0, float(os.environ.get("PROXY_CACHE_ZMQ_RECONNECT_DELAY_S", "3") or 3.0))
         self._poll_timeout_ms = max(100, int(float(os.environ.get("PROXY_CACHE_ZMQ_POLL_TIMEOUT_MS", "1000") or 1000)))
         self._state: Dict[str, Any] = {
-            "enabled": bool(self._endpoint),
-            "endpoint": self._endpoint or None,
+            "enabled": bool(self._endpoints),
+            # Keep the old single-endpoint field for existing debug consumers.
+            "endpoint": self._endpoints[0] if len(self._endpoints) == 1 else None,
+            "endpoints": list(self._endpoints),
             "topic": self._topic.decode("utf-8", errors="ignore"),
             "connected": False,
             "connect_count": 0,
@@ -46,14 +51,14 @@ class ZMQCacheSubscriber:
 
     @property
     def enabled(self) -> bool:
-        return bool(self._endpoint)
+        return bool(self._endpoints)
 
     def snapshot_state(self) -> Dict[str, Any]:
         return dict(self._state)
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
-        if not self._endpoint:
-            self._logger.info("[Proxy][CacheZMQ] subscriber disabled because PROXY_CACHE_ZMQ_ENDPOINT is empty")
+        if not self._endpoints:
+            self._logger.info("[Proxy][CacheZMQ] subscriber disabled because no ZMQ endpoint is configured")
             return
         if zmq is None:
             self._record_error("import", "pyzmq_not_installed")
@@ -68,10 +73,11 @@ class ZMQCacheSubscriber:
                 socket = context.socket(zmq.SUB)
                 socket.setsockopt(zmq.SUBSCRIBE, self._topic)
                 socket.setsockopt(zmq.LINGER, 0)
-                socket.connect(self._endpoint)
+                for endpoint in self._endpoints:
+                    socket.connect(endpoint)
                 self._state["connected"] = True
                 self._state["connect_count"] = int(self._state.get("connect_count", 0) or 0) + 1
-                self._logger.info("[Proxy][CacheZMQ] connected endpoint=%s topic=%s", self._endpoint, self._state["topic"])
+                self._logger.info("[Proxy][CacheZMQ] connected endpoints=%s topic=%s", list(self._endpoints), self._state["topic"])
 
                 while not stop_event.is_set():
                     try:
@@ -93,7 +99,7 @@ class ZMQCacheSubscriber:
                     self._state["last_message_at"] = int(time.time() * 1000)
                     if not self._state.get("first_message_logged"):
                         self._state["first_message_logged"] = True
-                        self._logger.info("[Proxy][CacheZMQ] first raw event received endpoint=%s", self._endpoint)
+                        self._logger.info("[Proxy][CacheZMQ] first raw event received endpoints=%s", list(self._endpoints))
                     await self._on_message(payload)
 
             except Exception as exc:
@@ -108,8 +114,8 @@ class ZMQCacheSubscriber:
 
             if not stop_event.is_set():
                 self._logger.warning(
-                    "[Proxy][CacheZMQ] reconnect scheduled endpoint=%s delay_s=%s last_error=%s",
-                    self._endpoint,
+                    "[Proxy][CacheZMQ] reconnect scheduled endpoints=%s delay_s=%s last_error=%s",
+                    list(self._endpoints),
                     self._reconnect_delay_s,
                     self._state.get("last_error"),
                 )

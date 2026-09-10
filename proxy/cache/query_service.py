@@ -1,7 +1,7 @@
 """Stable read-side query API for cache visibility index."""
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .index import CacheVisibilityIndex
 
@@ -26,6 +26,19 @@ class CacheQueryService:
             "locations": self._index.get_chunk_locations(namespace=namespace, chunk_key=chunk_key),
         }
 
+    def list_chunks(
+        self,
+        namespace: Optional[str] = None,
+        instance_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        chunks = self._index.list_chunks(namespace=namespace, instance_id=instance_id)
+        return {
+            "namespace": namespace,
+            "instance_id": instance_id,
+            "chunk_count": len(chunks),
+            "chunks": chunks,
+        }
+
     def get_namespace_summary(self, namespace: str) -> Dict[str, Any]:
         return self._index.get_namespace_summary(namespace)
 
@@ -34,3 +47,15 @@ class CacheQueryService:
 
     def lookup_prefix(self, namespace: str, prefix_key: str) -> Dict[str, Any]:
         return self._index.lookup_prefix(namespace=namespace, prefix_key=prefix_key)
+
+    def lookup_longest_prefix(
+        self,
+        namespace: str,
+        chunk_keys: List[str] | Tuple[str, ...],
+        prefix_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self._index.lookup_longest_prefix(
+            namespace=namespace,
+            chunk_keys=chunk_keys,
+            prefix_key=prefix_key,
+        )

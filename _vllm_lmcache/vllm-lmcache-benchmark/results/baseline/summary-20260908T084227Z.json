@@ -1,0 +1,215 @@
+{
+  "run_id": "20260908T084227Z",
+  "timestamp_utc": "2026-09-08T08:44:44.986849+00:00",
+  "base_url": "http://127.0.0.1:8000",
+  "model": "llama-3-70b-instruct",
+  "requests": 20,
+  "concurrency": 4,
+  "max_tokens": 1024,
+  "prompt_characters": null,
+  "workload_file": null,
+  "prompt_file": "prompts.txt",
+  "workload_counts": {
+    "prompt_line_4": 1,
+    "prompt_line_6": 1,
+    "prompt_line_8": 1,
+    "prompt_line_10": 1,
+    "prompt_line_12": 1,
+    "prompt_line_14": 1,
+    "prompt_line_16": 1,
+    "prompt_line_18": 1,
+    "prompt_line_20": 1,
+    "prompt_line_22": 1,
+    "prompt_line_24": 1,
+    "prompt_line_26": 1,
+    "prompt_line_28": 1,
+    "prompt_line_30": 1,
+    "prompt_line_32": 1,
+    "prompt_line_34": 1,
+    "prompt_line_36": 1,
+    "prompt_line_38": 1,
+    "prompt_line_40": 1,
+    "prompt_line_42": 1
+  },
+  "workload_plan": {
+    "prompt_line_4": {
+      "requests": 1,
+      "prompt_characters_min": 36,
+      "prompt_characters_max": 36,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_6": {
+      "requests": 1,
+      "prompt_characters_min": 49,
+      "prompt_characters_max": 49,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_8": {
+      "requests": 1,
+      "prompt_characters_min": 76,
+      "prompt_characters_max": 76,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_10": {
+      "requests": 1,
+      "prompt_characters_min": 78,
+      "prompt_characters_max": 78,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_12": {
+      "requests": 1,
+      "prompt_characters_min": 77,
+      "prompt_characters_max": 77,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_14": {
+      "requests": 1,
+      "prompt_characters_min": 82,
+      "prompt_characters_max": 82,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_16": {
+      "requests": 1,
+      "prompt_characters_min": 73,
+      "prompt_characters_max": 73,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_18": {
+      "requests": 1,
+      "prompt_characters_min": 73,
+      "prompt_characters_max": 73,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_20": {
+      "requests": 1,
+      "prompt_characters_min": 80,
+      "prompt_characters_max": 80,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_22": {
+      "requests": 1,
+      "prompt_characters_min": 82,
+      "prompt_characters_max": 82,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_24": {
+      "requests": 1,
+      "prompt_characters_min": 78,
+      "prompt_characters_max": 78,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_26": {
+      "requests": 1,
+      "prompt_characters_min": 80,
+      "prompt_characters_max": 80,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_28": {
+      "requests": 1,
+      "prompt_characters_min": 73,
+      "prompt_characters_max": 73,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_30": {
+      "requests": 1,
+      "prompt_characters_min": 74,
+      "prompt_characters_max": 74,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_32": {
+      "requests": 1,
+      "prompt_characters_min": 76,
+      "prompt_characters_max": 76,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_34": {
+      "requests": 1,
+      "prompt_characters_min": 80,
+      "prompt_characters_max": 80,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_36": {
+      "requests": 1,
+      "prompt_characters_min": 75,
+      "prompt_characters_max": 75,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_38": {
+      "requests": 1,
+      "prompt_characters_min": 78,
+      "prompt_characters_max": 78,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_40": {
+      "requests": 1,
+      "prompt_characters_min": 77,
+      "prompt_characters_max": 77,
+      "requested_max_tokens": [
+        1024
+      ]
+    },
+    "prompt_line_42": {
+      "requests": 1,
+      "prompt_characters_min": 79,
+      "prompt_characters_max": 79,
+      "requested_max_tokens": [
+        1024
+      ]
+    }
+  },
+  "total_prompt_tokens": 1663,
+  "total_completion_tokens": 20480,
+  "wall_s": 137.1258,
+  "succeeded": 20,
+  "failed": 0,
+  "request_throughput_rps": 0.1459,
+  "generation_throughput_tokens_s": 149.3519,
+  "ttft_ms": {
+    "p50": 243.8,
+    "p90": 300.02,
+    "p95": 303.1,
+    "p99": 345.72
+  },
+  "tpot_ms": {
+    "p50": 26.44,
+    "p90": 27.07,
+    "p95": 27.09,
+    "p99": 27.11
+  }
+}

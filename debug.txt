@@ -1,0 +1,10 @@
+curl http://127.0.0.1:8010/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-r1-distill-qwen-7b-b",
+    "messages": [
+      {"role": "user", "content": "Act as a senior software engineer conducting a thorough code review of a Python module that handles user authentication and session management. This module is critical for our web application and is about to be deployed to production. The code uses Flask, JWT tokens, and Redis for session storage. I need you to evaluate the code from multiple perspectives: security, performance, maintainability, and error handling. Specifically, pay close attention to how the module validates JWT signatures, whether it properly handles token expiration and refresh flows, and if there are any race conditions when multiple requests update the same session concurrently. Also examine the logging practices: are sensitive data like passwords or tokens being inadvertently logged? Is the log level appropriately set for production, and are there enough debug-level logs to trace authentication failures during incident response? Review the exception handling patterns—does the module distinguish between transient errors (like Redis connection timeouts) and permanent errors, You are an expert Python debugger. I need your help to systematically diagnose a bug in my data processing pipeline. The pipeline reads large CSV files, performs multiple transformation steps including filtering null values, aggregating by categorical columns, and merging with reference tables. Recently, after upgrading pandas to version 2.0, the aggregation step started throwing a cryptic KeyError on a column that definitely exists. I have already verified the column name spelling, checked for leading/trailing spaces, and confirmed that the column is present in the DataFrame both before and after filtering. The error traceback points to a line inside a custom function that uses groupby and apply with a lambda. "}
+    ],
+    "max_tokens": 16,  
+    "temperature": 0
+  }'

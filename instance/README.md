@@ -126,6 +126,31 @@ Important behavior:
 - Dashboard, browser-opening, and Agent startup failures are logged as warnings and do not abort the Instance whenever local serving can continue.
 - Integrated Dashboard mode always passes `--no-auto-start` to `dashboard_server.py`, so `demo_instance.py` remains the Resource Agent lifecycle owner.
 
+### vLLM health-gated registration
+
+For a real vLLM backend, configure the Instance process with the following
+environment variables. Registration is delayed until the local vLLM health
+endpoint succeeds. Each heartbeat also probes vLLM; after the configured number
+of consecutive failures the Instance unregisters itself from Proxy and retries
+registration when vLLM recovers.
+
+```bash
+export INSTANCE_ID="10.0.0.10:9001"
+export INSTANCE_ADVERTISE_HOST="10.0.0.10"
+export INSTANCE_ADVERTISE_PORT=9001
+export INSTANCE_VLLM_HEALTH_URL="http://127.0.0.1:8000/health"
+export INSTANCE_VLLM_FAILURE_THRESHOLD=3
+export INSTANCE_BOOT_ID="$(cat /proc/sys/kernel/random/uuid)"
+export CACHEROUTE_INSTANCE_BOOT_ID="$INSTANCE_BOOT_ID"
+export PROXY_CP_URL="http://10.0.0.20:8002"
+```
+
+`INSTANCE_BOOT_ID` and `CACHEROUTE_INSTANCE_BOOT_ID` must be the same value.
+The first is sent by the Instance registration/heartbeat client; the second is
+attached to LMCache ZMQ cache events. When the Proxy observes a new boot ID for
+the same Instance ID, it removes old cache visibility records and ignores late
+events emitted by the old process generation.
+
 The default runtime Instance ID is:
 
 ```text

@@ -131,6 +131,8 @@ class InstanceInfo:
     meta: Dict[str, Any] = field(default_factory=dict)
     capabilities: Optional[InstanceCapability] = None
     capability_fingerprint: Optional[str] = None
+    boot_id: Optional[str] = None
+    state: str = "ready"
 
     load: InstanceLoad = field(default_factory=InstanceLoad)
     cache_metrics: InstanceCacheMetrics = field(default_factory=InstanceCacheMetrics)
@@ -189,6 +191,8 @@ class InstancePool:
         weight: float = 1.0,
         meta: Optional[Dict[str, Any]] = None,
         capabilities: Optional[InstanceCapability] = None,
+        boot_id: Optional[str] = None,
+        state: str = "ready",
     ) -> InstanceInfo:
         now = int(time.time())
         with self._lock:
@@ -207,6 +211,8 @@ class InstancePool:
                 it.capability_fingerprint = (
                     capability_fingerprint(capabilities) if capabilities is not None else None
                 )
+                it.boot_id = boot_id
+                it.state = state
                 if it.load.inflight is None:
                     it.load.inflight = 0
                 it.last_seen_at = now
@@ -222,6 +228,8 @@ class InstancePool:
                 meta=meta or {},
                 capabilities=capabilities,
                 capability_fingerprint=capability_fingerprint(capabilities) if capabilities is not None else None,
+                boot_id=boot_id,
+                state=state,
                 load=InstanceLoad(inflight=0),
                 registered_at=now,
                 last_seen_at=now,
@@ -237,12 +245,18 @@ class InstancePool:
         gpu_util: Optional[float] = None,
         capabilities: Optional[InstanceCapability] = None,
         capability_fingerprint_value: Optional[str] = None,
+        boot_id: Optional[str] = None,
+        state: Optional[str] = None,
     ) -> HeartbeatResult:
         now = int(time.time())
         with self._lock:
             it = self._items.get(instance_id)
             if not it:
                 return HeartbeatResult(ok=False)
+            if boot_id is not None and it.boot_id is not None and boot_id != it.boot_id:
+                # A delayed heartbeat from a previous process must not keep the
+                # replacement process alive under the same public instance ID.
+                return HeartbeatResult(ok=False, error="boot_id_mismatch")
             if capabilities is None and capability_fingerprint_value is not None:
                 if it.capability_fingerprint != capability_fingerprint_value:
                     # Do not refresh liveness until the Instance sends the complete
@@ -259,6 +273,10 @@ class InstancePool:
                         reported_fingerprint=capability_fingerprint_value,
                     )
             it.last_seen_at = now
+            if boot_id is not None:
+                it.boot_id = boot_id
+            if state is not None:
+                it.state = state
             # Inflight is Proxy-maintained via begin_request/end_request.
             # Keep heartbeat load updates for non-lifecycle signals only.
             if qps_1m is not None:
@@ -809,6 +827,11 @@ class InstancePool:
         with self._lock:
             return self._items.pop(instance_id, None) is not None
 
+    def boot_id_for(self, instance_id: str) -> Optional[str]:
+        with self._lock:
+            item = self._items.get(instance_id)
+            return item.boot_id if item is not None else None
+
     def list(self, include_dead: bool = False) -> List[InstanceInfo]:
         now = int(time.time())
         with self._lock:
@@ -819,7 +842,7 @@ class InstancePool:
 
         alive: List[InstanceInfo] = []
         for it in items:
-            if (now - int(it.last_seen_at)) <= self._ttl_s:
+            if (now - int(it.last_seen_at)) <= self._ttl_s and it.state == "ready":
                 alive.append(it)
         return alive
 

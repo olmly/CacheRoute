@@ -1,0 +1,18 @@
+chunk_size: 128
+local_cpu: true
+max_local_cpu_size: 20.0
+remote_url: "redis://127.0.0.1:6379"
+remote_serde: "cachegen"
+local_disk: null
+max_local_disk_size: 0
+save_decode_cache: false
+cache_policy: "LRU"
+numa_mode: null
+zmq_event_publisher:
+  enabled: true
+  host: "0.0.0.0"
+  port: 5558
+  topic: "lmcache.events"
+  instance_id: "127.0.0.1:9003"
+  device: "cpu"
+  cache_tier: "l1"

@@ -1,0 +1,67 @@
+#超级长
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-r1-distill-qwen-7b-a",
+    "messages": [
+      {"role": "user", "content": "Act as a senior software engineer conducting a thorough code review of a Python module that handles user authentication and session management. This module is critical for our web application and is about to be deployed to production. The code uses Flask, JWT tokens, and Redis for session storage. I need you to evaluate the code from multiple perspectives: security, performance, maintainability, and error handling. Specifically, pay close attention to how the module validates JWT signatures, whether it properly handles token expiration and refresh flows, and if there are any race conditions when multiple requests update the same session concurrently. Also examine the logging practices: are sensitive data like passwords or tokens being inadvertently logged? Is the log level appropriately set for production, and are there enough debug-level logs to trace authentication failures during incident response? Review the exception handling patterns—does the module distinguish between transient errors (like Redis connection timeouts) and permanent errors, You are an expert Python debugger. I need your help to systematically diagnose a bug in my data processing pipeline. The pipeline reads large CSV files, performs multiple transformation steps including filtering null values, aggregating by categorical columns, and merging with reference tables. Recently, after upgrading pandas to version 2.0, the aggregation step started throwing a cryptic KeyError on a column that definitely exists. I have already verified the column name spelling, checked for leading/trailing spaces, and confirmed that the column is present in the DataFrame both before and after filtering. The error traceback points to a line inside a custom function that uses groupby and apply with a lambda. I suspect the issue might be related to changes in how pandas handles index alignment or how groupby treats categorical dtypes. Could you please guide me through a step-by-step diagnostic strategy? Start by suggesting how to isolate whether the problem is in the filtering step, the groupby construction, or the apply function itself. Then propose specific checks I can run in an interactive debugger, such as inspecting the internal state of the groupby object, examining the dtype of the grouping column, and verifying the function signature compatibility. Also, advise on how to set up conditional breakpoints that only trigger when certain data conditions are met, to avoid stopping on every iteration. Finally, recommend logging strategies at different stages so I can capture the DataFrame shape and column dtypes before the crash happens, without flooding the log with too much data. Please keep your advice practical and actionable, with concrete code snippets where useful.s"}
+    ],
+    "max_tokens": 16,  
+    "temperature": 0
+  }'
+
+curl http://127.0.0.1:8010/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-r1-distill-qwen-7b-b",
+    "messages": [
+      {"role": "user", "content": "Act as a senior software engineer conducting a thorough code review of a Python module that handles user authentication and session management. This module is critical for our web application and is about to be deployed to production. The code uses Flask, JWT tokens, and Redis for session storage. I need you to evaluate the code from multiple perspectives: security, performance, maintainability, and error handling. Specifically, pay close attention to how the module validates JWT signatures, whether it properly handles token expiration and refresh flows, and if there are any race conditions when multiple requests update the same session concurrently. Also examine the logging practices: are sensitive data like passwords or tokens being inadvertently logged? Is the log level appropriately set for production, and are there enough debug-level logs to trace authentication failures during incident response? Review the exception handling patterns—does the module distinguish between transient errors (like Redis connection timeouts) and permanent errors, and does it implement appropriate retry logic with exponential backoff? Additionally, assess the unit test coverage: are edge cases like malformed tokens, expired sessions, and concurrent modification covered? Suggest improvements to make the code more resilient, including circuit breakers for external dependencies, structured logging with correlation IDs, and better separation of concerns between the HTTP layer and the business logic. Provide your feedback in a constructive, prioritized list format, starting with critical security issues, then performance bottlenecks, and finally code style and documentation suggestions."}
+    ],
+    "max_tokens": 16,  
+    "temperature": 0
+  }'
+
+tail -f /tmp/cacheroute-stack-ab/logs/proxy.log
+tail -f /tmp/cacheroute-stack-ab/logs/lmcache-a.log
+tail -f /tmp/cacheroute-stack-ab/logs/lmcache-b.log
+tail -f /tmp/cacheroute-stack-ab/logs/vllm-a.log
+tail -f /tmp/cacheroute-stack-ab/logs/vllm-b.log
+tail -f /tmp/cacheroute-stack-ab/logs/instance-a.log
+tail -f /tmp/cacheroute-stack-ab/logs/instance-b.log
+
+
+#查询地址：
+curl -sS http://127.0.0.1:8002/v1/instance/list | jq
+显示已注册、可路由且仍存活的 Instance；显示instance,对应的vllm和状态
+
+#查看整个proxy所有保存的chunk
+curl -sS http://127.0.0.1:8002/debug/cache/chunks | jq
+
+#只查看某instance保存的chunk
+curl -sS \
+  'http://127.0.0.1:8002/debug/cache/chunks?instance_id=127.0.0.1:9001' \
+  | jq
+
+#只查看某个chunk是否存在？
+curl -sS \
+  'http://127.0.0.1:8002/debug/cache/chunk/<chunk_key>?namespace=<namespace>' \
+  | jq
+
+#查看订阅器是否收到 A/B 的 ZMQ 消息：
+curl -sS http://127.0.0.1:8002/debug/cache/subscriber_state | jq
+
+#最长连续前缀匹配使用：
+curl -sS -X POST http://127.0.0.1:8002/v1/cache/longest-prefix-lookup \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<'JSON' | jq
+{
+  "namespace": "/workspace/llm-stack/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B::unknown_tokenizer::default",
+  "chunk_keys": [
+    "第一个chunk_key",
+    "第二个chunk_key",
+    "第三个chunk_key"
+  ],
+  "prefix_key": "manual-prefix-test",
+  "include_unregistered": false
+}
+JSON

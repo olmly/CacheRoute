@@ -14,10 +14,12 @@ Instance adaptation layer between the vLLM instance and Proxy:
 from __future__ import annotations
 
 import uvicorn,logging
+import httpx
 import os
 import asyncio
 import json
 import subprocess
+import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
@@ -40,9 +42,27 @@ PROXY_CP_URL = os.environ.get("PROXY_CP_URL", config.PROXY_CP_URL).rstrip("/")
 INSTANCE_ADVERTISE_HOST = os.environ.get("INSTANCE_ADVERTISE_HOST", config.INSTANCE_HOST)
 INSTANCE_ADVERTISE_PORT = int(os.environ.get("INSTANCE_ADVERTISE_PORT", os.environ.get("INSTANCE_PORT", config.INSTANCE_PORT)))
 INSTANCE_ID = os.environ.get("INSTANCE_ID", f"hp_{INSTANCE_ADVERTISE_HOST}:{INSTANCE_ADVERTISE_PORT}")
+INSTANCE_BOOT_ID = os.environ.get("INSTANCE_BOOT_ID", str(uuid.uuid4()))
+INSTANCE_VLLM_HEALTH_URL = os.environ.get("INSTANCE_VLLM_HEALTH_URL", "").strip()
+INSTANCE_VLLM_FAILURE_THRESHOLD = max(1, int(os.environ.get("INSTANCE_VLLM_FAILURE_THRESHOLD", "3")))
 
-vllm_base_url = config.VLLM_BASE_URL.rstrip("/")
-use_mock = True if config.USE_MOCK else False
+vllm_base_url = os.environ.get("VLLM_BASE_URL", config.VLLM_BASE_URL).rstrip("/")
+use_mock = os.environ.get("USE_MOCK", str(config.USE_MOCK)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _vllm_is_healthy(logger: logging.Logger) -> bool:
+    """Probe the local vLLM only when health gating is explicitly configured."""
+    if not INSTANCE_VLLM_HEALTH_URL:
+        return True
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as health_client:
+            response = await health_client.get(INSTANCE_VLLM_HEALTH_URL)
+        if response.is_success:
+            return True
+        logger.warning("[Instance] vLLM health probe returned status=%s url=%s", response.status_code, INSTANCE_VLLM_HEALTH_URL)
+    except Exception as exc:
+        logger.debug("[Instance] vLLM health probe failed url=%s err=%s", INSTANCE_VLLM_HEALTH_URL, exc)
+    return False
 
 
 def _norm_http_base(raw: str) -> str:
@@ -229,47 +249,89 @@ async def lifespan(app: FastAPI):
     app.state._cp_task = asyncio.create_task(_run_cp())  # type: ignore
     logger.info("[Instance] control plane started: http://%s:%s", cp_host, cp_port)
 
-    try:
-        reg = await client.register(
-            instance_id=INSTANCE_ID,
-            host=INSTANCE_ADVERTISE_HOST,
-            port=INSTANCE_ADVERTISE_PORT,
-            endpoints=["chat/completions", "completions"],
-            meta={"version": "instance_v1"},
-            capabilities=capabilities,
-            capability_fingerprint=local_capability_fingerprint,
-        )
-        runtime_instance_id = reg.instance_id
-        interval = float(reg.heartbeat_interval_s) if reg.heartbeat_interval_s else 10.0
-        print(
-            f"[Instance] registered to proxy_cp={PROXY_CP_URL} "
-            f"id={reg.instance_id} advertise={INSTANCE_ADVERTISE_HOST}:{INSTANCE_ADVERTISE_PORT} "
-            f"hb={reg.heartbeat_interval_s}s ttl={reg.ttl_s}s"
-        )
-    except Exception as e:
-        # Do not block Instance startup: Proxy cannot see it if registration fails, but Instance can still run.
-        interval = 10.0
-        runtime_instance_id = INSTANCE_ID
-        print(f"[Instance][WARN] register failed: proxy_cp={PROXY_CP_URL} err={e}")
+    runtime_instance_id = INSTANCE_ID
+    interval = 10.0
+    registered = False
+
+    async def _register_if_healthy() -> bool:
+        nonlocal runtime_instance_id, interval
+        if not await _vllm_is_healthy(logger):
+            return False
+        try:
+            reg = await client.register(
+                instance_id=INSTANCE_ID,
+                host=INSTANCE_ADVERTISE_HOST,
+                port=INSTANCE_ADVERTISE_PORT,
+                endpoints=["chat/completions", "completions"],
+                meta={"version": "instance_v1", "vllm_health_url": INSTANCE_VLLM_HEALTH_URL or None},
+                capabilities=capabilities,
+                capability_fingerprint=local_capability_fingerprint,
+                boot_id=INSTANCE_BOOT_ID,
+                state="ready",
+            )
+            runtime_instance_id = reg.instance_id
+            interval = float(reg.heartbeat_interval_s) if reg.heartbeat_interval_s else 10.0
+            print(
+                f"[Instance] registered to proxy_cp={PROXY_CP_URL} "
+                f"id={reg.instance_id} boot_id={INSTANCE_BOOT_ID} "
+                f"advertise={INSTANCE_ADVERTISE_HOST}:{INSTANCE_ADVERTISE_PORT} "
+                f"hb={reg.heartbeat_interval_s}s ttl={reg.ttl_s}s"
+            )
+            return True
+        except Exception as exc:
+            print(f"[Instance][WARN] register failed: proxy_cp={PROXY_CP_URL} err={exc}")
+            return False
+
+    registered = await _register_if_healthy()
+    if not registered and INSTANCE_VLLM_HEALTH_URL:
+        logger.info("[Instance] waiting for vLLM health before Proxy registration: %s", INSTANCE_VLLM_HEALTH_URL)
 
     async def _hb():
-        fail = 0
+        nonlocal registered
+        health_fail = 0
+        proxy_fail = 0
         while not stop.is_set():
+            healthy = await _vllm_is_healthy(logger)
+            if not healthy:
+                health_fail += 1
+                if registered and health_fail >= INSTANCE_VLLM_FAILURE_THRESHOLD:
+                    try:
+                        await client.unregister(runtime_instance_id)
+                    except Exception:
+                        pass
+                    registered = False
+                    logger.warning("[Instance] vLLM unhealthy x%s; unregistered id=%s", health_fail, runtime_instance_id)
+                await asyncio.sleep(interval)
+                continue
+
+            health_fail = 0
+            if not registered:
+                registered = await _register_if_healthy()
+                await asyncio.sleep(interval)
+                continue
             try:
                 heartbeat_result = await client.heartbeat(
                     runtime_instance_id,
                     capability_fingerprint=local_capability_fingerprint,
+                    boot_id=INSTANCE_BOOT_ID,
+                    state="ready",
                 )
                 if heartbeat_result.get("requires_capabilities"):
                     # Resolve a restarted Proxy or changed local capability contract
                     # without making every regular heartbeat carry the full object.
-                    await client.heartbeat(runtime_instance_id, capabilities=capabilities)
-                fail = 0
+                    heartbeat_result = await client.heartbeat(
+                        runtime_instance_id, capabilities=capabilities,
+                        boot_id=INSTANCE_BOOT_ID, state="ready",
+                    )
+                if not heartbeat_result.get("ok"):
+                    registered = False
+                    logger.warning("[Instance] heartbeat rejected; will register again id=%s result=%s", runtime_instance_id, heartbeat_result)
+                proxy_fail = 0
             except Exception as e:
-                fail += 1
+                proxy_fail += 1
                 # Log once every 6 failures to avoid noisy output.
-                if fail % 6 == 0:
-                    print(f"[Instance][WARN] heartbeat failed x{fail}: proxy_cp={PROXY_CP_URL} err={e}")
+                if proxy_fail % 6 == 0:
+                    print(f"[Instance][WARN] heartbeat failed x{proxy_fail}: proxy_cp={PROXY_CP_URL} err={e}")
             await asyncio.sleep(interval)
 
     task = asyncio.create_task(_hb())
@@ -277,7 +339,7 @@ async def lifespan(app: FastAPI):
 
     resource_monitor = getattr(app.state, "_demo_resource_monitor", None)  # type: ignore
     dashboard = getattr(app.state, "_demo_dashboard", None)  # type: ignore
-    registration_ok = runtime_instance_id == getattr(reg, "instance_id", None) if "reg" in locals() else False
+    registration_ok = registered
     if resource_monitor is not None:
         if registration_ok:
             await resource_monitor.start_after_registration(runtime_instance_id=runtime_instance_id, stop_event=stop, logger=logger)

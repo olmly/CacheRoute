@@ -1,0 +1,4 @@
+{"id": 0, "ok": true, "status": 200, "latency_ms": 603.5028733313084, "prompt_tokens": 4640, "completion_tokens": 16, "total_tokens": 4656, "text_head": "Based on the provided text, here are three key points:\n\n1. **St"}
+{"id": 1, "ok": true, "status": 200, "latency_ms": 631.8846419453621, "prompt_tokens": 4640, "completion_tokens": 16, "total_tokens": 4656, "text_head": "Based on the provided text, here are three key points:\n\n1. **St"}
+{"id": 2, "ok": true, "status": 200, "latency_ms": 631.6246502101421, "prompt_tokens": 4640, "completion_tokens": 16, "total_tokens": 4656, "text_head": "Based on the provided text, here are three key points:\n\n1. **St"}
+{"id": 3, "ok": true, "status": 200, "latency_ms": 654.562383890152, "prompt_tokens": 4640, "completion_tokens": 16, "total_tokens": 4656, "text_head": "Based on the provided text, here are three key points:\n\n1. **St"}

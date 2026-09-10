@@ -1,0 +1,29 @@
+{
+  "run_id": "20260903T025554Z",
+  "timestamp_utc": "2026-09-03T02:56:43.228403+00:00",
+  "base_url": "http://127.0.0.1:8000",
+  "model": "llama-3-70b-instruct",
+  "requests": 192,
+  "concurrency": 24,
+  "max_tokens": 128,
+  "prompt_characters": 31,
+  "total_prompt_tokens": 6720,
+  "total_completion_tokens": 24576,
+  "wall_s": 48.3778,
+  "succeeded": 192,
+  "failed": 0,
+  "request_throughput_rps": 3.9688,
+  "generation_throughput_tokens_s": 508.0017,
+  "ttft_ms": {
+    "p50": 206.33,
+    "p90": 4016.69,
+    "p95": 4058.44,
+    "p99": 4724.63
+  },
+  "tpot_ms": {
+    "p50": 30.7,
+    "p90": 30.9,
+    "p95": 35.02,
+    "p99": 35.23
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "mode": "hot_prefix",
+  "url": "http://127.0.0.1:8000/v1/chat/completions",
+  "metrics_url": "http://127.0.0.1:8000/metrics",
+  "model": "llama-3-70b-instruct",
+  "num_requests": 4,
+  "concurrency": 8,
+  "max_tokens": 16,
+  "success": 4,
+  "failed": 0,
+  "wall_s": 0.6560862511396408,
+  "request_per_s": 6.096759371274561,
+  "completion_token_per_s_client": 97.54814994039297,
+  "latency_p50_ms": 631.8846419453621,
+  "latency_p95_ms": 654.562383890152,
+  "latency_p99_ms": 654.562383890152,
+  "metrics_delta": {
+    "vllm:prefix_cache_queries": 18560.0,
+    "vllm:prompt_tokens": 18560.0,
+    "vllm:prefix_cache_hits": 18496.0,
+    "vllm:num_requests_waiting": 0.0,
+    "vllm:generation_tokens": 64.0,
+    "vllm:num_preemptions": 0.0,
+    "vllm:request_success": 4.0,
+    "vllm:num_requests_running": 0.0
+  },
+  "lmcache_token_hit_ratio": null,
+  "vllm_prefix_hit_ratio": 0.996551724137931,
+  "metrics_before": {
+    "vllm:num_requests_running": 0.0,
+    "vllm:num_requests_waiting": 0.0,
+    "vllm:prefix_cache_queries": 13924.0,
+    "vllm:prefix_cache_hits": 9264.0,
+    "vllm:num_preemptions": 0.0,
+    "vllm:prompt_tokens": 13924.0,
+    "vllm:generation_tokens": 48.0,
+    "vllm:request_success": 3.0
+  },
+  "metrics_after": {
+    "vllm:num_requests_running": 0.0,
+    "vllm:num_requests_waiting": 0.0,
+    "vllm:prefix_cache_queries": 32484.0,
+    "vllm:prefix_cache_hits": 27760.0,
+    "vllm:num_preemptions": 0.0,
+    "vllm:prompt_tokens": 32484.0,
+    "vllm:generation_tokens": 112.0,
+    "vllm:request_success": 7.0
+  }
+}

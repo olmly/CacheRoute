@@ -35,6 +35,8 @@ class ProxyControlClient:
         meta: Optional[Dict[str, Any]] = None,
         capabilities: Optional[InstanceCapability] = None,
         capability_fingerprint: Optional[str] = None,
+        boot_id: Optional[str] = None,
+        state: Optional[str] = None,
     ) -> RegisterResult:
         payload = {
             "instance_id": instance_id,
@@ -47,6 +49,10 @@ class ProxyControlClient:
             payload["capabilities"] = capabilities.model_dump(mode="json")
         if capability_fingerprint is not None:
             payload["capability_fingerprint"] = capability_fingerprint
+        if boot_id is not None:
+            payload["boot_id"] = boot_id
+        if state is not None:
+            payload["state"] = state
         r = await self._client.post(f"{self.base_url}/v1/instance/register", json=payload)
         r.raise_for_status()
         j = r.json()
@@ -62,12 +68,18 @@ class ProxyControlClient:
         instance_id: str,
         capability_fingerprint: Optional[str] = None,
         capabilities: Optional[InstanceCapability] = None,
+        boot_id: Optional[str] = None,
+        state: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload = {"instance_id": instance_id}
         if capability_fingerprint is not None:
             payload["capability_fingerprint"] = capability_fingerprint
         if capabilities is not None:
             payload["capabilities"] = capabilities.model_dump(mode="json")
+        if boot_id is not None:
+            payload["boot_id"] = boot_id
+        if state is not None:
+            payload["state"] = state
         r = await self._client.post(f"{self.base_url}/v1/instance/heartbeat", json=payload)
         r.raise_for_status()
         return r.json()

@@ -116,7 +116,8 @@ def _build_pool_resource_snapshot(app: FastAPI) -> Dict[str, Any]:
 def _build_cache_namespace(req_obj: SchedulerRequest) -> str:
     # 中文注释：第一阶段先使用模型名 + 注入模式构造 namespace，给后续 tokenizer/version 细化预留位置。
     prompt = getattr(req_obj, "Prompt", None)
-    service = getattr(req_obj, "Service", None)
+    service = getattr(req_obj, "Service", None)#正能控制的是自己的准备程度。
+
     model = str(getattr(prompt, "model", "") or "unknown_model").strip()
     injection_type = str(getattr(service, "Injection_type", "kvcache") or "kvcache").strip().lower()
     return f"{model}::default_tokenizer::{injection_type}"
@@ -130,6 +131,15 @@ async def _handle_cache_visibility_message(app: FastAPI, raw_message: Any) -> No
         return
 
     event = result.event
+    current_boot_id = app.state.instance_pool.boot_id_for(event.instance_id)  # type: ignore
+    if event.boot_id and current_boot_id and event.boot_id != current_boot_id:
+        logger.warning(
+            "[Proxy][CacheZMQ] skip stale-generation event instance_id=%s event_boot_id=%s current_boot_id=%s",
+            event.instance_id,
+            event.boot_id,
+            current_boot_id,
+        )
+        return
     try:
         update = app.state.cache_visibility_index.apply_event(event)  # type: ignore
     except Exception as exc:
@@ -142,12 +152,23 @@ async def _handle_cache_visibility_message(app: FastAPI, raw_message: Any) -> No
         )
         return
 
-    # 中文注释：第一次成功事件用 INFO，后续高频事件降到 DEBUG，避免刷屏。
-    if getattr(app.state, "_cache_event_logged_once", False):  # type: ignore
-        logger.debug("[Proxy][CacheZMQ] event applied summary=%s", update)
-    else:
-        app.state._cache_event_logged_once = True  # type: ignore
-        logger.info("[Proxy][CacheZMQ] first normalized event applied summary=%s", update)
+    # 中文注释：为便于排查缓存可见性问题，每次成功事件都输出 INFO。
+    logger.info(
+        "[Proxy][CacheZMQ] event applied instance_id=%s device=%s "
+        "cache_tier=%s event_type=%s chunk_key=%s physical_key=%s kv_rank=%s "
+        "object_group_id=%s event_keys_count=%s boot_id=%s summary=%s",
+        event.instance_id,
+        event.device,
+        (event.raw.get("cache_tier") or event.raw.get("cacheTier") or "unknown"),
+        event.event_type,
+        event.chunk_key,
+        event.physical_key,
+        event.kv_rank,
+        event.object_group_id,
+        event.event_keys_count,
+        event.boot_id,
+        update,
+    )
 
 
 def _squelch_noisy_loggers():
@@ -183,6 +204,7 @@ async def lifespan(app: FastAPI):
     app.state.cache_visibility_index = CacheVisibilityIndex()  # type: ignore
     app.state.cache_query_service = CacheQueryService(app.state.cache_visibility_index)  # type: ignore
     p_control_plane.set_cache_query_provider(app.state.cache_query_service)  # type: ignore
+    p_control_plane.set_cache_instance_purge_provider(app.state.cache_visibility_index.remove_instance)  # type: ignore
     app.state.cache_metrics_poller = LMCacheMetricsPoller(app.state.instance_pool, logger_=logger)  # type: ignore
     p_control_plane.set_cache_refresh_provider(app.state.cache_metrics_poller.refresh)  # type: ignore
     app.state.cache_zmq_subscriber = ZMQCacheSubscriber(  # type: ignore
@@ -301,9 +323,9 @@ async def lifespan(app: FastAPI):
         getattr(app.state.cache_metrics_poller, "interval_s", "?"),
     )
     logger.info(
-        "[Proxy][CacheZMQ] subscriber enabled=%s endpoint=%s",
+        "[Proxy][CacheZMQ] subscriber enabled=%s endpoints=%s",
         getattr(app.state.cache_zmq_subscriber, "enabled", False),
-        getattr(app.state.cache_zmq_subscriber, "snapshot_state", lambda: {})().get("endpoint"),
+        getattr(app.state.cache_zmq_subscriber, "snapshot_state", lambda: {})().get("endpoints"),
     )
 
     try:
@@ -531,13 +553,19 @@ def _build_cache_lookup(pool: InstancePool, req_obj: SchedulerRequest) -> Dict[s
     if query_service is not None:
         lookup = query_service.lookup_prefix(namespace=namespace, prefix_key=prefix_key)
         matches = lookup.get("matches", [])
+        chunk_keys = lookup.get("chunk_keys", [])
+        match_strategy = lookup.get("match_strategy")
     else:
         matches = pool.lookup_prefix(prefix_key, include_dead=False)
+        chunk_keys = []
+        match_strategy = "instance_pool_prefix_presence"
     return {
         "enabled": True,
         "namespace": namespace,
         "prefix_key": prefix_key,
         "knowledge_ids": [str(item) for item in knowledge_ids],
+        "chunk_keys": chunk_keys if isinstance(chunk_keys, list) else [],
+        "match_strategy": match_strategy,
         "matches": matches if isinstance(matches, list) else [
             {
                 "instance_id": item.instance_id,
